@@ -1,356 +1,171 @@
 import Foundation
 
-public final class CleanerEngine: Sendable {
-    public init() {}
+public actor RecoveryStore {
+    private let url: URL
+    private var entries: [RecoveryEntry]
+    public init(directory: URL) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        url = directory.appendingPathComponent("recovery-v1.json")
+        if FileManager.default.fileExists(atPath: url.path) {
+            entries = try JSONDecoder().decode([RecoveryEntry].self, from: Data(contentsOf: url))
+        } else { entries = [] }
+    }
+    public func all() -> [RecoveryEntry] { entries.sorted { $0.createdAt > $1.createdAt } }
+    public func put(_ entry: RecoveryEntry) throws {
+        var next = entries.filter { $0.id != entry.id }; next.append(entry)
+        let data = try JSONEncoder().encode(next)
+        try data.write(to: url, options: .atomic)
+        entries = next
+    }
+    public func remove(_ id: UUID) throws {
+        let next = entries.filter { $0.id != id }
+        try JSONEncoder().encode(next).write(to: url, options: .atomic)
+        entries = next
+    }
+}
 
-    public func clean(
-        items: [ScanItem],
-        mode: CleanExecutionMode,
-        quitCursorIfNeeded: Bool = true,
-        onItemProgress: @Sendable (Int, Int, String, CleanedItemResult?) -> Void
-    ) async -> [CleanedItemResult] {
-        var results: [CleanedItemResult] = []
-        let total = items.count
+public struct CleanerEngine: Sendable {
+    public let environment: ScanEnvironment
+    public let recovery: RecoveryStore
+    private let activity: @Sendable () -> ActivitySnapshot
+    private let testTrashDirectory: String?
+    public init(environment: ScanEnvironment, recovery: RecoveryStore,
+                activity: @escaping @Sendable () -> ActivitySnapshot = { .current() }, testTrashDirectory: String? = nil) {
+        self.environment = environment; self.recovery = recovery; self.activity = activity; self.testTrashDirectory = testTrashDirectory
+    }
 
-        for (index, item) in items.enumerated() {
-            if Task.isCancelled { break }
-            onItemProgress(index, total, "正在处理：\(item.title)...", nil)
+    public func clean(items: [ScanItem], mode: CleanExecutionMode,
+                      onProgress: @Sendable (Int, Int, String) async -> Void) async -> CleanReport {
+        var report = CleanReport()
+        for item in items {
+            if Task.isCancelled { report.canceled = true; break }
+            await onProgress(report.results.count, items.count, item.title)
+            if Task.isCancelled { report.canceled = true; break }
+            let result = await cleanItem(item, mode: mode)
+            report.results.append(result)
+            await onProgress(report.results.count, items.count, item.title)
+        }
+        report.canceled = report.canceled || Task.isCancelled
+        return report
+    }
 
-            let result: CleanedItemResult
-            if item.isDemoItem {
-                try? await Task.sleep(nanoseconds: 120_000_000)
-                result = CleanedItemResult(
-                    title: item.title,
-                    path: item.path,
-                    bytesFreed: item.sizeBytes,
-                    success: true,
-                    message: "[演示预览] 已模拟\(mode.shortTitle)，未改动真实磁盘"
-                )
+    public func cleanItem(_ item: ScanItem, mode: CleanExecutionMode) async -> CleanedItemResult {
+        let fm = FileManager.default
+        do {
+            try Task.checkCancellation()
+            guard !item.inspectionOnly, item.category != .redundantFrameworks,
+                  !item.path.components(separatedBy: "/").dropLast().contains(where: { $0.hasSuffix(".app") }) else {
+                throw SafetyError.refused("应用包内核仅供检查，不执行删除")
+            }
+            try FileSafety.validate(item.path, roots: environment.writableRoots)
+            try validateRulePath(item)
+            let current = try FileSafety.tree(item.path, rejectProtectedData: item.category != .updaterLeftovers)
+            guard current == item.stamp else { throw SafetyError.refused("扫描后内容已变化，请重新扫描") }
+            let running = activity()
+            guard !running.isBusy(path: item.path, bundleIDs: item.ownerBundleIDs, appPaths: item.ownerAppPaths) else {
+                throw SafetyError.refused("关联应用或更新器正在运行，已跳过。退出后请重新扫描。")
+            }
+            // References can change without changing the old browser directory itself.
+            if item.path.hasPrefix(environment.library + "/Caches/ms-playwright/") {
+                let unused = try ScannerEngine.unreferencedPlaywrightDirectories(at: environment.library + "/Caches/ms-playwright")
+                guard unused.contains(item.path) else { throw SafetyError.refused("该浏览器版本已被项目引用，已保留") }
+            }
+            try Task.checkCancellation()
+            // Repeat ancestry validation immediately before the filesystem operation.
+            try FileSafety.validate(item.path, roots: environment.writableRoots)
+            if mode == .moveToTrash {
+                let planned = testTrashDirectory.map { $0 + "/" + UUID().uuidString + "-" + URL(fileURLWithPath: item.path).lastPathComponent }
+                var entry = RecoveryEntry(id: UUID(), originalPath: item.path, trashPath: planned,
+                                          stamp: current.root, tree: current, ownerBundleIDs: item.ownerBundleIDs, ownerAppPaths: item.ownerAppPaths, createdAt: Date(), state: .pending)
+                // Persist recovery intent before touching the original. A failed journal blocks cleanup.
+                try await recovery.put(entry)
+                try Task.checkCancellation()
+                do {
+                    if let planned {
+                        try fm.moveItem(atPath: item.path, toPath: planned)
+                    } else {
+                        var result: NSURL?
+                        try fm.trashItem(at: URL(fileURLWithPath: item.path), resultingItemURL: &result)
+                        entry.trashPath = result?.path
+                    }
+                } catch {
+                    try? await recovery.remove(entry.id)
+                    throw error
+                }
+                entry.state = .trashed
+                do { try await recovery.put(entry) }
+                catch {
+                    return CleanedItemResult(title: item.title, success: false, processedBytes: current.allocatedBytes,
+                                             message: "已移至废纸篓，但恢复记录写入失败。保留了待核对记录，请到清理记录检查。")
+                }
             } else {
-                result = executeRealClean(for: item, mode: mode, quitCursorIfNeeded: quitCursorIfNeeded)
+                try fm.removeItem(atPath: item.path)
             }
-
-            results.append(result)
-            onItemProgress(index + 1, total, "已完成：\(item.title)", result)
-        }
-
-        return results
-    }
-
-    // MARK: - Single Item Execution
-
-    public func executeRealClean(
-        for item: ScanItem,
-        mode: CleanExecutionMode,
-        quitCursorIfNeeded: Bool = true
-    ) -> CleanedItemResult {
-        switch item.actionType {
-        case .removeItem, .removeAppAndContainers:
-            return removePaths(
-                primaryPath: item.path,
-                additionalPaths: item.additionalPaths,
-                title: item.title,
-                estimatedBytes: item.sizeBytes,
-                mode: mode
-            )
-        case .removeChildren:
-            return removeChildren(
-                inDirectory: item.path,
-                title: item.title,
-                estimatedBytes: item.sizeBytes,
-                mode: mode
-            )
-        case .rebuildCursorStateDB:
-            return rebuildCursorDatabase(
-                dbPath: item.path,
-                title: item.title,
-                mode: mode,
-                quitCursorIfNeeded: quitCursorIfNeeded
-            )
-        }
-    }
-
-    // MARK: - Remove Item / Paths
-
-    private func removePaths(
-        primaryPath: String,
-        additionalPaths: [String],
-        title: String,
-        estimatedBytes: Int64,
-        mode: CleanExecutionMode
-    ) -> CleanedItemResult {
-        let fm = FileManager.default
-        let allPaths = [primaryPath] + additionalPaths
-        var freedBytes: Int64 = 0
-        var errors: [String] = []
-
-        for path in allPaths {
-            guard fm.fileExists(atPath: path) else { continue }
-            let beforeSize = ScannerEngine.directorySize(atPath: path)
-            do {
-                try deleteOrTrash(path: path, mode: mode)
-                freedBytes += max(beforeSize, 0)
-            } catch {
-                errors.append("\((path as NSString).lastPathComponent): \(error.localizedDescription)")
-            }
-        }
-
-        if errors.isEmpty {
-            let finalFreed = freedBytes > 0 ? freedBytes : estimatedBytes
-            return CleanedItemResult(
-                title: title,
-                path: primaryPath,
-                bytesFreed: finalFreed,
-                success: true,
-                message: "已\(mode.shortTitle)（释放 \(ByteFormatting.string(fromBytes: finalFreed))）"
-            )
-        } else {
-            return CleanedItemResult(
-                title: title,
-                path: primaryPath,
-                bytesFreed: freedBytes,
-                success: freedBytes > 0,
-                message: "部分或全部受限：\(errors.joined(separator: "; "))"
-            )
-        }
-    }
-
-    // MARK: - Remove Children Inside Directory
-
-    private func removeChildren(
-        inDirectory dirPath: String,
-        title: String,
-        estimatedBytes: Int64,
-        mode: CleanExecutionMode
-    ) -> CleanedItemResult {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: dirPath) else {
-            return CleanedItemResult(
-                title: title,
-                path: dirPath,
-                bytesFreed: 0,
-                success: true,
-                message: "目录已不存在，无需清理"
-            )
-        }
-
-        guard let children = try? fm.contentsOfDirectory(atPath: dirPath) else {
-            return CleanedItemResult(
-                title: title,
-                path: dirPath,
-                bytesFreed: 0,
-                success: false,
-                message: "无法读取目录内容（可能需要完全磁盘访问权限）"
-            )
-        }
-
-        let protectedNames: Set<String> = [
-            ".com.apple.containermanagerd.metadata.plist",
-            ".DS_Store"
-        ]
-
-        var freedBytes: Int64 = 0
-        var errors: [String] = []
-
-        for child in children where !protectedNames.contains(child) {
-            let childPath = (dirPath as NSString).appendingPathComponent(child)
-            let childSize = ScannerEngine.directorySize(atPath: childPath)
-            do {
-                try deleteOrTrash(path: childPath, mode: mode)
-                freedBytes += childSize
-            } catch {
-                errors.append("\(child): \(error.localizedDescription)")
-            }
-        }
-
-        if errors.isEmpty || freedBytes > 0 {
-            let reported = freedBytes > 0 ? freedBytes : estimatedBytes
-            let suffix = errors.isEmpty ? "" : "（\(errors.count) 个正在写入的临时文件已跳过）"
-            return CleanedItemResult(
-                title: title,
-                path: dirPath,
-                bytesFreed: reported,
-                success: true,
-                message: "已\(mode.shortTitle)释放 \(ByteFormatting.string(fromBytes: reported))\(suffix)"
-            )
-        } else {
-            return CleanedItemResult(
-                title: title,
-                path: dirPath,
-                bytesFreed: 0,
-                success: false,
-                message: "清理失败：\(errors.first ?? "权限不足")"
-            )
-        }
-    }
-
-    // MARK: - Atomic Lossless Rebuild of Cursor state.vscdb
-
-    public func rebuildCursorDatabase(
-        dbPath: String,
-        title: String,
-        mode: CleanExecutionMode,
-        quitCursorIfNeeded: Bool
-    ) -> CleanedItemResult {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: dbPath) else {
-            return CleanedItemResult(
-                title: title,
-                path: dbPath,
-                bytesFreed: 0,
-                success: false,
-                message: "未找到数据库文件：\(dbPath)"
-            )
-        }
-
-        let beforeBytes = ScannerEngine.directorySize(atPath: dbPath)
-            + ScannerEngine.directorySize(atPath: dbPath + "-wal")
-            + ScannerEngine.directorySize(atPath: dbPath + "-shm")
-
-        let cleanPath = dbPath + ".macslim_clean"
-        try? fm.removeItem(atPath: cleanPath)
-
-        // 1. Query original ItemTable row count
-        let countResult = Self.runSQLite(
-            dbPath: dbPath,
-            sql: "SELECT count(*) FROM ItemTable;"
-        )
-        guard countResult.exitCode == 0,
-              let originalRowCount = Int(countResult.output.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            return CleanedItemResult(
-                title: title,
-                path: dbPath,
-                bytesFreed: 0,
-                success: false,
-                message: "读取原数据库 ItemTable 失败，已终止操作以保护原文件：\(countResult.error)"
-            )
-        }
-
-        // 2. Build clean database with identical schema and copy ItemTable
-        let escapedOldPath = dbPath.replacingOccurrences(of: "'", with: "''")
-        let rebuildSQL = """
-        CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);
-        CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);
-        CREATE TABLE composerHeaders (composerId TEXT PRIMARY KEY, workspaceId TEXT, createdAt INTEGER, lastUpdatedAt INTEGER, isArchived INTEGER, isSubagent INTEGER, recency INTEGER, checkpointAt INTEGER, value TEXT, subagentTypeName TEXT);
-        CREATE INDEX idx_composerHeaders_0 ON composerHeaders (workspaceId, isSubagent, isArchived, recency);
-        CREATE INDEX idx_composerHeaders_1 ON composerHeaders (recency, composerId);
-        ATTACH DATABASE '\(escapedOldPath)' AS old_db;
-        INSERT INTO main.ItemTable SELECT key, value FROM old_db.ItemTable;
-        DETACH DATABASE old_db;
-        PRAGMA journal_mode=WAL;
-        """
-
-        let buildResult = Self.runSQLite(dbPath: cleanPath, sql: rebuildSQL)
-        guard buildResult.exitCode == 0, fm.fileExists(atPath: cleanPath) else {
-            try? fm.removeItem(atPath: cleanPath)
-            return CleanedItemResult(
-                title: title,
-                path: dbPath,
-                bytesFreed: 0,
-                success: false,
-                message: "构建新数据库失败，原文件未受任何改动：\(buildResult.error)"
-            )
-        }
-
-        // 3. Verify new ItemTable row count matches original
-        let verifyResult = Self.runSQLite(
-            dbPath: cleanPath,
-            sql: "SELECT count(*) FROM ItemTable;"
-        )
-        guard verifyResult.exitCode == 0,
-              let newRowCount = Int(verifyResult.output.trimmingCharacters(in: .whitespacesAndNewlines)),
-              newRowCount == originalRowCount else {
-            try? fm.removeItem(atPath: cleanPath)
-            return CleanedItemResult(
-                title: title,
-                path: dbPath,
-                bytesFreed: 0,
-                success: false,
-                message: "校验新数据库配置行数不一致，已中止替换并保留原数据库"
-            )
-        }
-
-        // 4. Gracefully quit Cursor if requested so file descriptors are released
-        if quitCursorIfNeeded {
-            _ = Self.runProcess(executable: "/usr/bin/osascript", arguments: ["-e", "tell application \"Cursor\" to quit"])
-            Thread.sleep(forTimeInterval: 1.0)
-        }
-
-        // 5. Swap clean DB into place (moving old DB to Trash if mode == .moveToTrash)
-        do {
-            try deleteOrTrash(path: dbPath, mode: mode)
-            try? fm.removeItem(atPath: dbPath + "-wal")
-            try? fm.removeItem(atPath: dbPath + "-shm")
-            try fm.moveItem(atPath: cleanPath, toPath: dbPath)
+            return CleanedItemResult(title: item.title, success: true, processedBytes: current.allocatedBytes,
+                message: mode == .moveToTrash ? "已移至废纸篓；清空废纸篓后才可能释放空间" : "已删除；实际可用空间受 APFS 快照和其他进程影响")
+        } catch is CancellationError {
+            return CleanedItemResult(title: item.title, success: false, processedBytes: 0, message: "已取消，未开始此项")
         } catch {
-            return CleanedItemResult(
-                title: title,
-                path: dbPath,
-                bytesFreed: 0,
-                success: false,
-                message: "替换数据库文件时出错：\(error.localizedDescription)"
-            )
+            return CleanedItemResult(title: item.title, success: false, processedBytes: 0, message: error.localizedDescription)
         }
-
-        let afterBytes = ScannerEngine.directorySize(atPath: dbPath)
-        let savedBytes = max(0, beforeBytes - afterBytes)
-        return CleanedItemResult(
-            title: title,
-            path: dbPath,
-            bytesFreed: savedBytes,
-            success: true,
-            message: "无损重组完成：保留全部 \(newRowCount) 项个人配置，数据库从 \(ByteFormatting.string(fromBytes: beforeBytes)) 降至 \(ByteFormatting.string(fromBytes: afterBytes))"
-        )
     }
 
-    // MARK: - Low-Level File & Process Helpers
+    private func validateRulePath(_ item: ScanItem) throws {
+        let components = item.path.components(separatedBy: "/").map { $0.lowercased() }
+        let caches = environment.library + "/Caches"
+        if FileSafety.isBelow(item.path, caches) {
+            let relative = String(item.path.dropFirst(caches.count + 1)).components(separatedBy: "/")
+            guard relative.count >= 2, !["macslim", "ms-playwright-go"].contains(relative[0].lowercased()),
+                  !relative.contains(".links") else { throw SafetyError.refused("受保护的缓存或运行时路径") }
+            return
+        }
+        if FileSafety.isBelow(item.path, environment.library + "/Logs"), ScannerEngine.isLogFile(URL(fileURLWithPath: item.path).lastPathComponent) { return }
+        let markers: Set<String> = ["cache", "caches", "code cache", "gpucache", "cachestorage", "cacheddata", "cachedextensionvsixs", "updatepackages", "crx_cache", "logs", "log"]
+        let parents = components.dropLast()
+        if parents.contains(where: { markers.contains($0) }) { return }
+        if item.path.contains("/org.sparkle-project.Sparkle/Installation/") || item.path.lowercased().contains("/larkshell/update/") { return }
+        throw SafetyError.refused("目标不符合已支持的缓存、更新包或日志结构")
+    }
 
-    private func deleteOrTrash(path: String, mode: CleanExecutionMode) throws {
+    public func reconcileRecovery() async -> [RecoveryEntry] {
         let fm = FileManager.default
-        let url = URL(fileURLWithPath: path)
-        switch mode {
-        case .moveToTrash:
-            do {
-                var resultingURL: NSURL?
-                try fm.trashItem(at: url, resultingItemURL: &resultingURL)
-            } catch {
-                // Fallback to moving directly into ~/.Trash if NSFileManager.trashItem fails
-                let trashDir = (NSHomeDirectory() as NSString).appendingPathComponent(".Trash")
-                try fm.createDirectory(atPath: trashDir, withIntermediateDirectories: true)
-                let baseName = (path as NSString).lastPathComponent
-                let destPath = (trashDir as NSString).appendingPathComponent("\(baseName)-\(Int(Date().timeIntervalSince1970))")
-                try fm.moveItem(atPath: path, toPath: destPath)
+        for var entry in await recovery.all() where entry.state == .pending {
+            if let s = try? FileSafety.stamp(entry.originalPath), s.inode == entry.stamp.inode, s.device == entry.stamp.device {
+                try? await recovery.remove(entry.id); continue
             }
-        case .permanentDelete:
-            try fm.removeItem(at: url)
+            if entry.trashPath == nil {
+                let trash = environment.homeDirectory + "/.Trash"
+                for name in (try? fm.contentsOfDirectory(atPath: trash)) ?? [] {
+                    let path = trash + "/" + name
+                    if let s = try? FileSafety.stamp(path), s.inode == entry.stamp.inode, s.device == entry.stamp.device {
+                        entry.trashPath = path; break
+                    }
+                }
+            }
+            if let path = entry.trashPath, fm.fileExists(atPath: path) {
+                entry.state = .trashed; try? await recovery.put(entry)
+            }
         }
+        return await recovery.all()
     }
 
-    private static func runSQLite(dbPath: String, sql: String) -> (exitCode: Int32, output: String, error: String) {
-        return runProcess(executable: "/usr/bin/sqlite3", arguments: [dbPath, sql])
-    }
-
-    private static func runProcess(executable: String, arguments: [String]) -> (exitCode: Int32, output: String, error: String) {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: executable)
-        proc.arguments = arguments
-
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        proc.standardOutput = outPipe
-        proc.standardError = errPipe
-
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-        } catch {
-            return (-1, "", error.localizedDescription)
-        }
-
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        let outStr = String(data: outData, encoding: .utf8) ?? ""
-        let errStr = String(data: errData, encoding: .utf8) ?? ""
-        return (proc.terminationStatus, outStr, errStr)
+    @discardableResult
+    public func restore(_ entry: RecoveryEntry) async throws -> String? {
+        let fm = FileManager.default
+        guard entry.state == .trashed, let trash = entry.trashPath else { throw SafetyError.refused("没有可用的废纸篓路径，请在访达中检查") }
+        let trashRoots = [testTrashDirectory ?? (environment.homeDirectory + "/.Trash")]
+        // System trash can reside in .Trashes/<uid> on another volume. This version only cleans home-volume data.
+        try FileSafety.validate(trash, roots: trashRoots)
+        let current = try FileSafety.stamp(trash)
+        guard current == entry.stamp, try FileSafety.tree(trash) == entry.tree else { throw SafetyError.refused("废纸篓项目已变化，已停止自动恢复") }
+        guard !fm.fileExists(atPath: entry.originalPath) else { throw SafetyError.refused("原位置已有文件，未覆盖。请先在访达中处理冲突。") }
+        let parent = URL(fileURLWithPath: entry.originalPath).deletingLastPathComponent().path
+        guard fm.fileExists(atPath: parent) else { throw SafetyError.refused("原父目录已不存在，请从废纸篓手动恢复") }
+        try FileSafety.validate(entry.originalPath, roots: environment.writableRoots) // validates missing target's parent below
+        guard !activity().isBusy(path: entry.originalPath, bundleIDs: entry.ownerBundleIDs, appPaths: entry.ownerAppPaths) else { throw SafetyError.refused("关联应用正在运行或进程状态未知，请退出后重试") }
+        try fm.moveItem(atPath: trash, toPath: entry.originalPath)
+        var updated = entry; updated.state = .restored
+        do { try await recovery.put(updated); return nil }
+        catch { return "文件已恢复至原位置，但恢复记录保存失败。请在访达中核对，勿重复恢复。" }
     }
 }

@@ -1,70 +1,77 @@
-# 分层测试、环境验证与发布准入规范
+# 测试与环境验证
 
-本文档记录 `MacSlim` 的支持矩阵、分层自动化验证入口、高价值回归用例以及版本发布准入标准。
+## 支持目标与证据边界
 
----
-
-## 1. 支持矩阵与运行依赖策略
-
-| 维度 | 规格说明 | 验证状态 |
+| 维度 | 目标 | 验证方式与限制 |
 | --- | --- | --- |
-| **目标操作系统** | macOS 13.0 (Ventura) 及以上 | 已在 macOS (Apple Silicon `arm64`) 实际运行验证 |
-| **CPU 架构** | Universal 通用双架构 (`arm64` Apple Silicon + `x86_64` Intel) | `lipo` 双架构构建通过，`arm64` 原生执行验证通过（`x86_64` 已完成交叉构建与二进制校验） |
-| **交付形式** | 独立 `.dmg` 磁盘镜像 (`MacSlim-<version>-Universal.dmg`)，内含 `MacSlim.app` 与 `/Applications` 拖拽链接 | 已验证实际产物构建、签名与 `--self-check` 启动 |
-| **运行时与外部依赖** | 零第三方依赖；仅调用 macOS 系统内置框架 (`SwiftUI`, `AppKit`, `CoreServices`, `CryptoKit`) 与系统自带 `/usr/bin/sqlite3` | 已随系统内置，无需用户额外安装 Python/Node 等运行时 |
-| **网络前提** | 扫描与清理核心功能 **100% 离线可用**；仅「检查更新 / 下载更新包」需访问 HTTPS 更新源 | 已验证离线/错误地址不阻塞主流程 |
-| **代码签名状态** | 本地 Ad-hoc 签名 (`codesign --force --deep --sign -`)，附 SHA-256 校验清单 | 未配置 Apple Developer ID 公证（已在 README 明确标注首次启动指引） |
+| 操作系统 | macOS 13+ | 编译以 13.0 为最低部署目标；13/14 与新系统的完整 GUI、权限与安装仍需对应机器验收 |
+| 架构 | arm64、x86_64 | 分别编译并合成 Universal；Apple Silicon 上的 Rosetta 检查不等于 Intel 实机验收 |
+| 用户环境 | 普通账户，不要求 root | 权限不足的目录跳过并报告；完全磁盘访问权限可扩大可读范围，不自动提升权限 |
+| 核心运行时 | macOS 原生框架 | 不依赖 Python、Node.js、sqlite3 或第三方库；进程快照使用系统 `/bin/ps`，获取失败则停止清理 |
+| 网络 | 扫描、清理、恢复无需联网 | 用户点击更新时访问 GitHub；生产更新源仅接受 HTTPS |
+| 签名 | 当前 Ad-hoc | `codesign --verify` 只能验证签名结构，不能证明已通过 Developer ID、公证或下载隔离后的首次启动 |
+| Shell | macOS zsh 执行开发脚本 | 最终 App 为 GUI；没有面向用户的终端清理接口，不支持 Windows/Linux |
 
----
+CI 配置 `macos-15`、`macos-15-intel`、`macos-26`。这些为已配置的检查目标，远程执行结果以 GitHub Actions 为准。macOS 13/14 没有在此工作流中冒充已验证；旧 hosted runner 的退役情况见 [官方 runner 列表](https://github.com/actions/runner-images)。
 
-## 2. 一键检查与构建命令
+## 日常回归
 
-### 2.1 日常快速检查（Static Typecheck + 隔离单元/集成回归）
-每次修改代码后执行，耗时约 5–8 秒，返回精确退出码：
-
-```bash
+```sh
 ./scripts/check.sh
 ```
 
-包含两个阶段：
-1. **静态类型与语法检查**：对 `Sources/` 下全部 7 个 Swift 源码文件执行 `/usr/bin/swiftc -typecheck`。
-2. **隔离沙盒单元与集成测试 (`Tests/run_tests.swift`)**：在 `/tmp/macslim_test_<uuid>` 隔离目录中构造模拟的 `Home`、`Applications` 与 `AppSupport`，执行 26 项断言验证，不触碰开发机真实用户数据。
+使用 Swift 6 与 warnings-as-errors。全源码类型检查后，在独立临时根目录构造 Home、Applications、Trash、恢复记录与更新包。测试注入空进程快照和隔离废纸篓，不调用真实 Cursor、不操作真实废纸篓、不联网、不修改真实应用或数据库。临时测试二进制按运行隔离，避免并行检查覆盖同一文件。
 
-### 2.2 发布候选构建与产物核验
-准备发布或打包 `.dmg` 时执行：
+覆盖的核心契约：
 
-```bash
+- 未列举应用的 ShipIt、Sparkle，沙盒 UpdatePackages，Lark 和 Google 更新缓存结构识别。
+- 最近写入内容保留；未知应用缓存默认不选；通用日志识别支持中文和空格路径。
+- 数据库、聊天、凭据特征与 Playwright-Go 运行时保留。
+- Playwright 登记引用、平台覆盖版本、损坏引用与扫描后新增引用保护。
+- 应用内核仅供检查；Current 在扫描后变化也不会触发修改。
+- 清理前内容变化、目标消失、符号链接重定向、运行中应用与无法读取进程状态均拒绝清理。
+- 取消后不处理下一个真实文件；界面保持忙碌直至实际工作任务退出。
+- 废纸篓原路径恢复、重启后读取记录、目标冲突不覆盖、记录写入失败保留原文件。
+- 旧配置迁移、阈值校验、配置持久化。
+- 版本排序与非法版本拒绝、更新目标系统/架构/通道过滤、哈希/体积错误拒绝、生产源拒绝本地文件。
+- 子进程较大输出不会因先等待后读取管道而死锁。
+
+## 候选产物
+
+```sh
 ./scripts/build_dmg.sh
+./scripts/verify_release.sh
 ```
 
-依次执行：
-1. 调用 `./scripts/check.sh` 确保全部 26 项测试通过。
-2. 矢量生成全尺寸 `AppIcon.icns`。
-3. 分别编译 `arm64-apple-macosx13.0` 与 `x86_64-apple-macosx13.0` 并合成 Universal 二进制。
-4. 注入权威版本 `VERSION` 至 `Info.plist`，执行 `codesign --verify --deep --strict`。
-5. 运行 `MacSlim.app/Contents/MacOS/MacSlim --self-check` 校验包内版本身份与初始化链路。
-6. 打包 `dist/MacSlim-<version>-Universal.dmg`，并生成 `dist/SHA256SUMS.txt` 与 `dist/release-manifest.json`。
+构建执行回归、生成图标、编译两种架构、签名、校验包内版本身份、打包 DMG 和生成清单，再核对架构、签名、DMG 与哈希。哈希检查在 `dist` 中执行，不依赖调用时工作目录。
 
----
+`--self-check` 在创建用户状态之前退出，只验证版本身份和启动。它不证明扫描权限、完整界面或安装流程可用。
 
-## 3. 核心高价值回归用例清单
+GUI 隔离验收须额外使用 `swiftc -D UI_TESTING` 构建独立测试包（正式包不会启用这些入口），可使用仅允许 `/private/tmp/macslim-ui-*` 根目录的 `--ui-fixture <root>`：该根内必须提供 `Home`、`Applications` 和 `Trash`；设置与恢复记录写入 `State`。此入口只供验收，不应向普通用户宣传为清理 CLI。
 
-| 用例编号 | 覆盖场景 | 输入 / 前置条件 | 预期可观察结果 |
-| --- | --- | --- | --- |
-| **TC-01** | Electron `ShipIt` 更新残留识别 | `~/Library/Caches/*.ShipIt/update.*` 含超过阈值的残留包 | 归类为 `.safe`（完全无感项），默认勾选 (`isSelected == true`) |
-| **TC-02** | 应用包内多版本内核安全清理 | `.app/Contents/Frameworks/*.framework/Versions/` 含 `130.0.1`、`131.0.2` 及 `Current -> 131.0.2` | 仅扫描并清理 `130.0.1`，严格保留 `Current` 指向的 `131.0.2` 激活版本 |
-| **TC-03** | Chrome `Service Worker` 离线缓存 | `Default/Service Worker/CacheStorage` 超过阈值 | 识别并清理离线缓存，不触碰同级 `Cookies`、`Bookmarks`、`Login Data` |
-| **TC-04** | 中文与空格路径兼容性 | `~/Library/Logs/中文 空格测试应用/debug.log` | 正确计算字节大小并完成清理，无路径转义错误 |
-| **TC-05** | Cursor `state.vscdb` 原子无损重组 | 含 3 条 `ItemTable` 核心键值（含 `cursorAuth/accessToken`）与膨胀 `cursorDiskKV` | 归为 `.deep`（默认不勾选）；重组后 `cursorDiskKV` 清零，`ItemTable` 3 条数据与 Token 原值 100% 保留 |
-| **TC-06** | 休眠大应用与受保护容器元数据 | 超过 180 天未打开的 `.app` 及 `~/Library/Containers/<id>`（含 `.com.apple.containermanagerd.metadata.plist`） | 清理应用与容器 `Data/` 载荷，保留受系统保护的 `.com.apple.containermanagerd.metadata.plist` 不报错 |
-| **TC-07** | 演示模式与真实模式隔离及配置持久化 | 切换 `isDemoMode` 并修改 `minCacheSizeMB` 后重建 `AppStore` | 演示数据 (13 项) 与真实状态完全隔离；配置跨会话持久化生效 |
-| **TC-08** | SemVer 2.0.0 语义比较与通道过滤 | 比较 `1.10.0` vs `1.9.0`、`1.0.0` vs `1.0.0-beta.1`、`1.0.0+b1` vs `1.0.0+b2` 及 `stable` 过滤 `beta` | `1.10.0 > 1.9.0`；正式版高于预发布版；`+build` 不提升优先级；稳定版用户忽略测试版更新 |
-| **TC-09** | 更新包 SHA-256 校验与损坏包拒绝 | 分别传入匹配 SHA-256 与篡改 SHA-256 的更新清单与 `.dmg` | 匹配时进入 `.readyToInstall`；篡改时拒绝启用、转入 `.failed` 并自动清除临时 `.part` 文件 |
+## 发布前仍需验收
 
----
+1. 在最低系统与 Intel 实机上走完“安装 → 首次启动 → 扫描 → 检查 → 移至废纸篓 → 恢复”。
+2. 在拒绝/授予完全磁盘访问权限的两种状态下，确认提示与扫描范围一致；验证普通账户只读目录与移动失败。
+3. 检查窄窗口、长路径、明暗主题、键盘导航和清理确认。
+4. 用原 1.0 设置数据执行实际包替换升级，核对设置保留和移除功能不再执行。单元迁移检查不等于真实旧版本 OTA 验收。
+5. Developer ID、公证、真实下载隔离、GitHub Release 资产和远程更新源全部通过后，才能称为正式发布。源码修复与本地打包不自动公开发布。
 
-## 4. 发布准入标准 (Release Gate)
+## 已知边界
 
-1. `./scripts/check.sh` 全部 26 项断言 100% 通过。
-2. `VERSION`、`Sources/Models.swift` (`AppMetadata.version`)、`Info.plist`、Git Tag (`vX.Y.Z`)、`.dmg` 文件名与 `release-manifest.json` 版本号完全一致。
-3. 最终 `.dmg` 资产、对应的 `SHA256SUMS.txt` 与 `release-manifest.json` 完整上传至对应 GitHub Release，并通过 `shasum -a 256 -c` 核验。
+清理前检查可以降低竞态风险，不能锁住第三方应用或阻止它在最后一瞬间启动。工具不会强制退出其他应用，建议先退出相关应用与安装器再清理。单个文件系统操作开始后不能保证中途撤销，停止会在操作返回后生效。手动更改废纸篓内容、跨进程同时运行多个 MacSlim 或外部移动恢复记录均需谨慎处理。
+
+缓存位置和格式会随应用版本变化。结构扫描有深度限制，宁可漏报也不无限探索个人数据。体积估算不等于 APFS 实际可回收量。
+
+## 本次本机验收记录（2026-11-03）
+
+环境：macOS 15.7.7，Apple Silicon，Swift 6.2.3。
+
+- `./scripts/build_dmg.sh` 完整执行成功；其中 Swift 6 严格检查与 55 项隔离回归全部通过。
+- 最终 Universal App、版本 1.1.0 / build 110、签名、DMG 镜像及 SHA-256 验证通过。x86_64 切片通过本机 Rosetta 执行 `--self-check`。
+- 原图标转换在本机失败，已改为直接生成 ICNS 容器，并使用系统 sips 验证可解码。DMG 创建需要系统磁盘镜像服务；本次在获准的非沙盒构建环境完成。
+- 独立标识、独立临时 Home / State / Trash 的 GUI 测试包完成扫描、清理确认、三个临时项目移入隔离废纸篓、查看记录和逐项原路恢复。
+- 已实际检查浅色、深色、约 740 点宽窗口、中文与长路径、扫描快捷键、设置和更新页面切换。更新检查能返回当前通道结果，未执行真实下载安装升级。
+- 生产构建不启用 `UI_TESTING`，测试参数与测试 Info.plist 不能关闭正式包的运行状态保护。
+
+上述记录不表示 GitHub CI 已运行，也不表示 Intel 实机、macOS 13/14、真实系统废纸篓权限、干净环境或旧版实际 OTA 升级已验收。尚未执行 Developer ID 签名、公证或公开发布。

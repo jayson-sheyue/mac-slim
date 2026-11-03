@@ -16,33 +16,23 @@ public struct SemVer: Equatable, Comparable, CustomStringConvertible, Sendable {
             raw.removeFirst()
         }
 
-        // Split off +buildMetadata first
-        let plusParts = raw.split(separator: "+", maxSplits: 1, omittingEmptySubsequences: false)
-        let withoutBuild = String(plusParts[0])
-        self.buildMetadata = plusParts.count > 1 ? String(plusParts[1]) : nil
-
-        // Split off -prerelease
-        let dashParts = withoutBuild.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
-        let corePart = String(dashParts[0])
-        if dashParts.count > 1 {
-            let pre = String(dashParts[1])
-            guard !pre.isEmpty else { return nil }
-            self.prerelease = pre.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-            if self.prerelease.contains(where: \.isEmpty) { return nil }
-        } else {
-            self.prerelease = []
+        let parts = raw.split(separator: "+", maxSplits: 1, omittingEmptySubsequences: false)
+        func validIdentifiers(_ value: String) -> Bool {
+            value.split(separator: ".", omittingEmptySubsequences: false).allSatisfy {
+                !$0.isEmpty && $0.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 }
+            }
         }
-
-        let nums = corePart.split(separator: ".", omittingEmptySubsequences: false)
-        guard nums.count >= 2 && nums.count <= 3 else { return nil }
-        guard let maj = Int(nums[0]), let min = Int(nums[1]), maj >= 0, min >= 0 else { return nil }
-        let pat: Int
-        if nums.count == 3 {
-            guard let p = Int(nums[2]), p >= 0 else { return nil }
-            pat = p
-        } else {
-            pat = 0
-        }
+        if parts.count == 2 && !validIdentifiers(String(parts[1])) { return nil }
+        buildMetadata = parts.count == 2 ? String(parts[1]) : nil
+        let dash = parts[0].split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        if dash.count == 2 {
+            guard validIdentifiers(String(dash[1])) else { return nil }
+            prerelease = dash[1].split(separator: ".").map(String.init)
+            guard !prerelease.contains(where: { $0.utf8.allSatisfy { (48...57).contains($0) } && $0.count > 1 && $0.first == "0" }) else { return nil }
+        } else { prerelease = [] }
+        let nums = dash[0].split(separator: ".", omittingEmptySubsequences: false)
+        guard nums.count == 3, nums.allSatisfy({ !$0.isEmpty && $0.utf8.allSatisfy { (48...57).contains($0) } && ($0.count == 1 || $0.first != "0") }),
+              let maj = Int(nums[0]), let min = Int(nums[1]), let pat = Int(nums[2]) else { return nil }
 
         self.major = maj
         self.minor = min
@@ -80,17 +70,17 @@ public struct SemVer: Equatable, Comparable, CustomStringConvertible, Sendable {
 
         for (lId, rId) in zip(lhs.prerelease, rhs.prerelease) {
             if lId == rId { continue }
-            let lNum = Int(lId)
-            let rNum = Int(rId)
+            let lNum = lId.utf8.allSatisfy { (48...57).contains($0) }
+            let rNum = rId.utf8.allSatisfy { (48...57).contains($0) }
             switch (lNum, rNum) {
-            case let (.some(ln), .some(rn)):
-                return ln < rn
-            case (.some, .none):
+            case (true, true):
+                return lId.count == rId.count ? lId < rId : lId.count < rId.count
+            case (true, false):
                 // Numeric identifiers always have lower precedence than non-numeric identifiers
                 return true
-            case (.none, .some):
+            case (false, true):
                 return false
-            case (.none, .none):
+            case (false, false):
                 return lId < rId
             }
         }
@@ -170,19 +160,21 @@ public enum UpdateEvaluator {
         }
 
         // 3. Architecture check
-        if !manifest.supportedArchitectures.isEmpty && !manifest.supportedArchitectures.contains(currentArch) {
+        if !manifest.supportedArchitectures.contains(currentArch) {
             return .incompatibleSystem(
                 reason: "新版 v\(manifest.version) 仅支持架构 [\(manifest.supportedArchitectures.joined(separator: ", "))]，当前本机为 \(currentArch)"
             )
         }
 
-        // 4. Minimum macOS version check
-        if let minOS = SemVer(string: manifest.minSystemVersion),
-           let curOS = SemVer(string: currentOSVersion),
-           curOS < minOS {
-            return .incompatibleSystem(
-                reason: "新版 v\(manifest.version) 需要 macOS \(manifest.minSystemVersion) 及以上版本（当前为 macOS \(currentOSVersion)）"
-            )
+        func osVersion(_ value: String) -> SemVer? {
+            SemVer(string: value.split(separator: ".", omittingEmptySubsequences: false).count == 2 ? value + ".0" : value)
+        }
+        guard let minOS = osVersion(manifest.minSystemVersion), let curOS = osVersion(currentOSVersion),
+              !minOS.isPrerelease, minOS.buildMetadata == nil else {
+            return .incompatibleSystem(reason: "更新清单系统版本格式无效")
+        }
+        if curOS < minOS {
+            return .incompatibleSystem(reason: "新版需要 macOS \(manifest.minSystemVersion)，当前为 \(currentOSVersion)")
         }
 
         return .updateAvailable(manifest)
@@ -198,7 +190,7 @@ public enum UpdateEvaluator {
         uname(&sysinfo)
         return withUnsafePointer(to: &sysinfo.machine) {
             $0.withMemoryRebound(to: CChar.self, capacity: 1) {
-                String(validatingUTF8: $0) ?? "arm64"
+                String(cString: $0)
             }
         }
     }
@@ -245,7 +237,8 @@ public enum UpdateState: Equatable, Sendable {
 public actor UpdateService {
     private var isCheckInFlight: Bool = false
 
-    public init() {}
+    private let allowLocalFiles: Bool
+    public init(allowLocalFiles: Bool = false) { self.allowLocalFiles = allowLocalFiles }
 
     public func fetchAndEvaluateManifest(
         from urlString: String,
@@ -261,7 +254,7 @@ public actor UpdateService {
         let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed),
               let scheme = url.scheme?.lowercased(),
-              (scheme == "https" || scheme == "file") else {
+              (scheme == "https" || (scheme == "file" && allowLocalFiles)) else {
             return .failed(
                 reason: "更新源地址无效（仅支持安全的 HTTPS 或本地受控清单文件）",
                 manualURL: AppMetadata.releasesPageURL
@@ -312,78 +305,65 @@ public actor UpdateService {
 
     public func downloadAndVerifyDMG(
         manifest: ReleaseManifest,
-        destinationDirectory: URL = URL(fileURLWithPath: "/tmp"),
-        onPhase: @Sendable (UpdateState) -> Void
+        destinationDirectory: URL? = nil,
+        onPhase: @Sendable (UpdateState) async -> Void
     ) async -> UpdateState {
-        let trimmedURL = manifest.dmgUrl.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmedURL),
-              let scheme = url.scheme?.lowercased(),
-              (scheme == "https" || scheme == "file") else {
-            return .failed(
-                reason: "更新安装包下载地址不安全或格式无效（必须使用 HTTPS）",
-                manualURL: AppMetadata.releasesPageURL
-            )
-        }
-
         let fm = FileManager.default
-        try? fm.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
-
-        let partURL = destinationDirectory.appendingPathComponent("MacSlim-\(manifest.version).dmg.part")
-        let finalURL = destinationDirectory.appendingPathComponent("MacSlim-\(manifest.version)-Universal.dmg")
-        try? fm.removeItem(at: partURL)
-
-        onPhase(.downloading(progress: 0.2, targetVersion: manifest.version))
-
+        let expected = manifest.sha256.lowercased()
+        guard let version = SemVer(string: manifest.version), version.description == manifest.version,
+              expected.count == 64, expected.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              manifest.sizeBytes > 0, manifest.sizeBytes <= 1024 * 1024 * 1024,
+              let url = URL(string: manifest.dmgUrl),
+              url.scheme == "https" || (url.isFileURL && allowLocalFiles) else {
+            return .failed(reason: "更新清单中的地址、版本、体积或校验值无效", manualURL: AppMetadata.releasesPageURL)
+        }
+        // Each attempt owns a private directory; no shared predictable /tmp files.
+        let parent = destinationDirectory ?? fm.temporaryDirectory
+        let work = parent.appendingPathComponent("MacSlim-update-" + UUID().uuidString, isDirectory: true)
+        var keep = false
+        defer { if !keep { try? fm.removeItem(at: work) } }
         do {
-            let dmgData: Data
-            if scheme == "file" {
-                dmgData = try Data(contentsOf: url)
+            try fm.createDirectory(at: work, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let part = work.appendingPathComponent("download.part")
+            await onPhase(.downloading(progress: 0, targetVersion: manifest.version))
+            if url.isFileURL {
+                try fm.copyItem(at: url, to: part)
             } else {
-                var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60.0)
-                request.setValue("MacSlim/\(AppMetadata.version)", forHTTPHeaderField: "User-Agent")
-                let (data, response) = try await URLSession.shared.data(for: request)
-                if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                    return .failed(
-                        reason: "下载更新包失败（HTTP \(http.statusCode)），原应用与数据未受影响",
-                        manualURL: AppMetadata.releasesPageURL
-                    )
+                var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
+                request.setValue("MacSlim/" + AppMetadata.version, forHTTPHeaderField: "User-Agent")
+                let (download, response) = try await URLSession.shared.download(for: request)
+                defer { try? fm.removeItem(at: download) }
+                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), response.url?.scheme == "https" else {
+                    throw SafetyError.refused("更新包下载失败或被重定向到不安全地址")
                 }
-                dmgData = data
+                try fm.moveItem(at: download, to: part)
             }
-
-            guard !dmgData.isEmpty else {
-                return .failed(
-                    reason: "下载的更新包为空文件，已拒绝启用",
-                    manualURL: AppMetadata.releasesPageURL
-                )
+            try Task.checkCancellation()
+            let size = (try fm.attributesOfItem(atPath: part.path)[.size] as? NSNumber)?.int64Value ?? 0
+            guard size == manifest.sizeBytes else { throw SafetyError.refused("安装包体积与更新清单不符") }
+            await onPhase(.verifying(targetVersion: manifest.version))
+            let handle = try FileHandle(forReadingFrom: part)
+            defer { try? handle.close() }
+            var hash = SHA256()
+            while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
+                try Task.checkCancellation()
+                hash.update(data: data)
             }
-
-            try dmgData.write(to: partURL, options: .atomic)
-
-            // Verify cryptographic SHA-256 digest before enabling the final DMG file
-            onPhase(.verifying(targetVersion: manifest.version))
-            let digest = SHA256.hash(data: dmgData)
-            let actualHex = digest.map { String(format: "%02x", $0) }.joined()
-            let expectedHex = manifest.sha256.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-
-            guard actualHex == expectedHex else {
-                try? fm.removeItem(at: partURL)
-                return .failed(
-                    reason: "更新包 SHA-256 完整性校验失败（期望 \(expectedHex.prefix(12))...，实际 \(actualHex.prefix(12))...），已安全销毁损坏文件",
-                    manualURL: AppMetadata.releasesPageURL
-                )
+            guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == expected else {
+                throw SafetyError.refused("安装包 SHA-256 校验失败，未启用下载文件")
             }
-
-            try? fm.removeItem(at: finalURL)
-            try fm.moveItem(at: partURL, to: finalURL)
-
-            return .readyToInstall(dmgPath: finalURL.path, manifest: manifest)
+            let final = work.appendingPathComponent("MacSlim-" + manifest.version + "-Universal.dmg")
+            try fm.moveItem(at: part, to: final)
+            if !url.isFileURL {
+                let quarantine = "0081;" + String(Int(Date().timeIntervalSince1970), radix: 16) + ";MacSlim;"
+                guard ProcessRunner.run("/usr/bin/xattr", ["-w", "com.apple.quarantine", quarantine, final.path]).status == 0 else {
+                    throw SafetyError.refused("无法保留系统下载安全标记，请从版本发布页手动下载")
+                }
+            }
+            keep = true
+            return .readyToInstall(dmgPath: final.path, manifest: manifest)
         } catch {
-            try? fm.removeItem(at: partURL)
-            return .failed(
-                reason: "下载或写入更新包失败（\(error.localizedDescription)），已清理临时文件",
-                manualURL: AppMetadata.releasesPageURL
-            )
+            return .failed(reason: "更新包未启用：" + error.localizedDescription, manualURL: AppMetadata.releasesPageURL)
         }
     }
 }

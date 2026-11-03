@@ -1,675 +1,217 @@
 import Foundation
 import AppKit
+import SwiftUI
 
 @MainActor
 public final class AppStore: ObservableObject {
-    // MARK: - Published UI State
-
     @Published public var items: [ScanItem] = []
-    @Published public var diskUsage: DiskUsageInfo = DiskUsageInfo.current()
-    @Published public var isScanning: Bool = false
-    @Published public var isCleaning: Bool = false
-    @Published public var currentPhaseText: String = "准备就绪，点击「开始扫描」检测可安全释放的存储空间"
-    @Published public var cleanProgressFraction: Double = 0.0
+    @Published public var warnings: [String] = []
+    @Published public var history: [OperationRecord] = []
+    @Published public var recoveryEntries: [RecoveryEntry] = []
+    @Published public var isScanning = false
+    @Published public var isCleaning = false
+    @Published public var isStopping = false
+    @Published public var isRestoring = false
+    @Published public var phase = "扫描更新残留、缓存和历史日志，检查后再清理。"
     @Published public var cleanMode: CleanExecutionMode = .moveToTrash
-    @Published public var isDemoMode: Bool = false
-    @Published public var selectedSidebarFilter: SidebarFilter = .all
-    @Published public var searchText: String = ""
-    @Published public var config: ScannerConfig = .default {
-        didSet { saveConfig() }
-    }
-
-    // Global Task Center (Message Box) & Update Center
-    @Published public var taskRecords: [TaskRecord] = []
-    @Published public var isTaskDrawerOpen: Bool = false
-    @Published public var isSettingsPopoverOpen: Bool = false
-    @Published public var isUpdateSheetOpen: Bool = false
+    @Published public var selectedCategory: CleanupCategory?
+    @Published public var searchText = ""
+    @Published public var showHistory = false
+    @Published public var showSettings = false
+    @Published public var showUpdate = false
     @Published public var updateState: UpdateState = .idle
-    @Published public var lastCleanSummaryBanner: String? = nil
-
-    // MARK: - Sidebar Filter Enum
-
-    public enum SidebarFilter: Hashable, Identifiable {
-        case all
-        case tier(CleanupTier)
-        case category(CleanupCategory)
-
-        public var id: String {
-            switch self {
-            case .all: return "all"
-            case .tier(let t): return "tier_\(t.rawValue)"
-            case .category(let c): return "cat_\(c.rawValue)"
-            }
+    @Published public var diskUsage = DiskUsageInfo.current()
+    @Published public var config = ScannerConfig.default {
+        didSet {
+            saveConfig()
+            if oldValue != config && !isBusy { items = []; phase = "扫描设置已更改，请重新扫描。" }
         }
     }
+    @Published public var lastResults: [CleanedItemResult] = []
 
-    // MARK: - Internal Services & Ownership Tokens
-
-    private let scannerEngine: ScannerEngine
-    private let cleanerEngine: CleanerEngine
-    private let updateService = UpdateService()
-    private var activeScanToken: UUID?
-    private var activeScanTask: Task<Void, Never>?
-    private var activeCleanToken: UUID?
-    private var activeCleanTask: Task<Void, Never>?
-    private var announcedUpdateVersions: Set<String> = []
-
-    // Cross-view result cache
-    private var cachedRealItems: [ScanItem]?
-    private var cachedDemoItems: [ScanItem]?
-
-    private let storageDirectoryURL: URL
-
-    public init(
-        environment: ScanEnvironment = ScanEnvironment(),
-        storageDirectoryURL: URL? = nil
-    ) {
-        self.scannerEngine = ScannerEngine(environment: environment)
-        self.cleanerEngine = CleanerEngine()
-
-        if let customDir = storageDirectoryURL {
-            self.storageDirectoryURL = customDir
-        } else {
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-                ?? URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support"))
-            self.storageDirectoryURL = appSupport.appendingPathComponent("MacSlim", isDirectory: true)
-        }
-
-        loadConfig()
-        loadTaskHistoryAndReconcileStaleTasks()
-    }
-
-    // MARK: - Computed Properties
-
+    private let scanner: ScannerEngine
+    private let cleaner: CleanerEngine?
+    private let updateService: UpdateService
+    private let storage: URL
+    private var scanTask: Task<ScanReport, Never>?
+    private var cleanTask: Task<CleanReport, Never>?
+    private var updateTask: Task<Void, Never>?
+    public var isBusy: Bool { isScanning || isCleaning || isRestoring }
+    public var selectedItems: [ScanItem] { items.filter { $0.isSelected && !$0.inspectionOnly } }
+    public var selectedBytes: Int64 { selectedItems.reduce(0) { $0 + $1.sizeBytes } }
+    public var canClean: Bool { cleaner != nil && !isBusy && !selectedItems.isEmpty }
     public var filteredItems: [ScanItem] {
         items.filter { item in
-            let matchesSidebar: Bool
-            switch selectedSidebarFilter {
-            case .all:
-                matchesSidebar = true
-            case .tier(let tier):
-                matchesSidebar = (item.tier == tier)
-            case .category(let category):
-                matchesSidebar = (item.category == category)
-            }
-            guard matchesSidebar else { return false }
-
-            let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return true }
-            return item.title.localizedCaseInsensitiveContains(trimmed)
-                || item.appName.localizedCaseInsensitiveContains(trimmed)
-                || item.path.localizedCaseInsensitiveContains(trimmed)
-                || item.reason.localizedCaseInsensitiveContains(trimmed)
+            (selectedCategory == nil || selectedCategory == item.category) &&
+            (searchText.isEmpty || [item.title, item.appName, item.path].contains { $0.localizedCaseInsensitiveContains(searchText) })
         }
     }
 
-    public var selectedItems: [ScanItem] {
-        items.filter(\.isSelected)
+    public init(environment: ScanEnvironment = ScanEnvironment(), storageDirectoryURL: URL? = nil,
+                activity: @escaping @Sendable () -> ActivitySnapshot = { .current() }, testTrashDirectory: String? = nil) {
+        storage = storageDirectoryURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("MacSlim")
+        scanner = ScannerEngine(environment: environment, activity: activity)
+        updateService = UpdateService()
+        do {
+            let recovery = try RecoveryStore(directory: storage)
+            cleaner = CleanerEngine(environment: environment, recovery: recovery, activity: activity, testTrashDirectory: testTrashDirectory)
+        } catch {
+            cleaner = nil
+        }
+        if cleaner == nil { warnings.append("无法读取或保存恢复记录，清理已停用。请检查应用数据目录的权限与 recovery-v1.json。") }
+        let configURL = storage.appendingPathComponent("config.json")
+        if FileManager.default.fileExists(atPath: configURL.path) {
+            do { config = try JSONDecoder().decode(ScannerConfig.self, from: Data(contentsOf: configURL)) }
+            catch { warnings.append("设置读取失败，暂用默认值：\(error.localizedDescription)") }
+        }
+        let historyURL = storage.appendingPathComponent("operations-v1.json")
+        if FileManager.default.fileExists(atPath: historyURL.path) {
+            do { history = try JSONDecoder().decode([OperationRecord].self, from: Data(contentsOf: historyURL)) }
+            catch { warnings.append("历史记录读取失败：\(error.localizedDescription)") }
+        }
+        Task { [weak self] in await self?.refreshRecovery() }
     }
 
-    public var totalReclaimableBytes: Int64 {
-        items.reduce(0) { $0 + $1.sizeBytes }
-    }
-
-    public var selectedReclaimableBytes: Int64 {
-        selectedItems.reduce(0) { $0 + $1.sizeBytes }
-    }
-
-    public var unreadTaskCount: Int {
-        taskRecords.filter(\.isUnread).count
-    }
-
-    // MARK: - Mode Switching & Cache Reuse
-
-    public func setDemoMode(_ enabled: Bool) {
-        guard isDemoMode != enabled else { return }
-        // If a scan is running, cancel it cleanly before switching mode
-        cancelScanIfNeeded()
-        isDemoMode = enabled
-        lastCleanSummaryBanner = nil
-
-        if enabled {
-            if let cached = cachedDemoItems {
-                items = cached
-                currentPhaseText = "[演示预览模式] 已载入 79.3 GB 典型膨胀案例数据（不会修改真实磁盘）"
-            } else {
-                let demo = ScannerEngine.demoBlockerDataset()
-                cachedDemoItems = demo
-                items = demo
-                currentPhaseText = "[演示预览模式] 已载入 79.3 GB 典型膨胀案例数据（不会修改真实磁盘）"
-            }
-        } else {
-            if let cached = cachedRealItems {
-                items = cached
-                currentPhaseText = "已恢复本机扫描结果（共发现 \(cached.count) 项，可释放 \(ByteFormatting.string(fromBytes: totalReclaimableBytes))）"
-            } else {
-                items = []
-                currentPhaseText = "已切回本机真实扫描模式，点击「开始扫描」检测当前 Mac"
+    public func startScan() {
+        guard !isBusy else { return }
+        isScanning = true; isStopping = false; phase = "准备扫描…"; lastResults = []
+        let config = self.config
+        let scanner = self.scanner
+        let receiver = self
+        let worker = Task.detached(priority: .userInitiated) {
+            await scanner.scan(config: config) { message in
+                await receiver.setPhase(message)
             }
         }
-    }
-
-    // MARK: - Scan Lifecycle with Ownership Token
-
-    public func startScan(forceRefresh: Bool = true) {
-        if !forceRefresh {
-            if isDemoMode, let cached = cachedDemoItems {
-                items = cached
-                return
-            }
-            if !isDemoMode, let cached = cachedRealItems {
-                items = cached
-                return
-            }
-        }
-
-        // Invalidate previous scan token
-        activeScanTask?.cancel()
-        let token = UUID()
-        activeScanToken = token
-        isScanning = true
-        lastCleanSummaryBanner = nil
-        diskUsage = DiskUsageInfo.current()
-
-        let configSnapshot = self.config
-        let demoSnapshot = self.isDemoMode
-        let jobId = UUID().uuidString
-
-        let record = TaskRecord(
-            jobId: jobId,
-            title: demoSnapshot ? "载入 79GB 演示案例扫描" : "本机存储深度扫描",
-            operationType: "scan",
-            status: .running,
-            phaseText: "正在初始化扫描引擎...",
-            isDemoMode: demoSnapshot,
-            isUnread: false
-        )
-        upsertTaskRecord(record)
-
-        let engine = self.scannerEngine
-        activeScanTask = Task { [weak self] in
+        scanTask = worker
+        Task { [weak self] in
+            let report = await worker.value
             guard let self else { return }
-
-            if demoSnapshot {
-                self.currentPhaseText = "[演示预览] 正在生成典型膨胀样本..."
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                guard self.activeScanToken == token, !Task.isCancelled else { return }
-
-                let demoItems = ScannerEngine.demoBlockerDataset()
-                self.cachedDemoItems = demoItems
-                self.items = demoItems
-                self.isScanning = false
-                let totalBytes = demoItems.reduce(0) { $0 + $1.sizeBytes }
-                self.currentPhaseText = "[演示预览模式] 发现 \(demoItems.count) 项，可释放 \(ByteFormatting.string(fromBytes: totalBytes))"
-                self.finishTaskRecord(
-                    jobId: jobId,
-                    status: .succeeded,
-                    phaseText: "演示数据载入完成（\(demoItems.count) 项，共 \(ByteFormatting.string(fromBytes: totalBytes))）",
-                    totalItems: demoItems.count,
-                    processedItems: demoItems.count,
-                    bytesFreed: 0
-                )
-                return
-            }
-
-            let scanned = await Task.detached(priority: .userInitiated) {
-                await engine.scan(config: configSnapshot) { phase in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.activeScanToken == token else { return }
-                        self.currentPhaseText = phase
-                        self.updateTaskPhase(jobId: jobId, phaseText: phase)
-                    }
-                }
-            }.value
-
-            guard self.activeScanToken == token, !Task.isCancelled else {
-                self.finishTaskRecord(
-                    jobId: jobId,
-                    status: .canceled,
-                    phaseText: "扫描已取消",
-                    totalItems: 0,
-                    processedItems: 0,
-                    bytesFreed: 0
-                )
-                return
-            }
-
-            self.cachedRealItems = scanned
-            self.items = scanned
-            self.isScanning = false
+            self.items = report.items
+            self.warnings = self.warnings.filter { $0.contains("恢复记录") } + report.warnings
+            self.scanTask = nil; self.isScanning = false; self.isStopping = false
+            let cleanable = report.items.filter { !$0.inspectionOnly }.count
+            self.phase = report.canceled ? "扫描已停止，保留已发现的项目。" : "扫描完成：\(cleanable) 项清理候选，\(report.items.count - cleanable) 项仅供检查。"
+            if !report.warnings.isEmpty { self.phase += " 有 \(report.warnings.count) 条跳过或读取提示。" }
             self.diskUsage = DiskUsageInfo.current()
-
-            let totalBytes = scanned.reduce(0) { $0 + $1.sizeBytes }
-            if scanned.isEmpty {
-                self.currentPhaseText = "扫描完成：你的 Mac 非常干净，未发现超过阈值的冗余缓存或残留包！"
-            } else {
-                self.currentPhaseText = "扫描完成：发现 \(scanned.count) 项可清理数据，共可释放 \(ByteFormatting.string(fromBytes: totalBytes))"
-            }
-
-            self.finishTaskRecord(
-                jobId: jobId,
-                status: .succeeded,
-                phaseText: "发现 \(scanned.count) 项，共计 \(ByteFormatting.string(fromBytes: totalBytes))",
-                totalItems: scanned.count,
-                processedItems: scanned.count,
-                bytesFreed: 0
-            )
+            self.record("扫描", self.phase)
         }
     }
 
-    public func cancelScanIfNeeded() {
-        guard isScanning else { return }
-        activeScanToken = nil
-        activeScanTask?.cancel()
-        activeScanTask = nil
-        isScanning = false
-        currentPhaseText = "扫描已由用户取消"
-        for idx in taskRecords.indices where taskRecords[idx].operationType == "scan" && taskRecords[idx].status == .running {
-            taskRecords[idx].status = .canceled
-            taskRecords[idx].phaseText = "用户手动取消扫描"
-            taskRecords[idx].updatedAt = Date()
-        }
-        saveTaskHistory()
+    public func stop() {
+        guard isScanning || isCleaning else { return }
+        isStopping = true
+        phase = "正在停止，等待当前文件操作结束…"
+        scanTask?.cancel(); cleanTask?.cancel()
+        // Remain busy until the actual worker acknowledges completion.
     }
-
-    // MARK: - Clean Lifecycle with Ownership Token
 
     public func startCleanSelected() {
+        guard canClean, let cleaner else { return }
         let targets = selectedItems
-        guard !targets.isEmpty, !isCleaning else { return }
-
-        activeCleanTask?.cancel()
-        let token = UUID()
-        activeCleanToken = token
-        isCleaning = true
-        cleanProgressFraction = 0.0
-        lastCleanSummaryBanner = nil
-
-        let modeSnapshot = self.cleanMode
-        let demoSnapshot = self.isDemoMode
-        let jobId = UUID().uuidString
-
-        let record = TaskRecord(
-            jobId: jobId,
-            title: demoSnapshot ? "[演示预览] 模拟清理 \(targets.count) 项" : "清理 \(targets.count) 项冗余数据（\(modeSnapshot.shortTitle)）",
-            operationType: "clean",
-            status: .running,
-            phaseText: "准备清理 \(targets.count) 项...",
-            totalItemsCount: targets.count,
-            processedItemsCount: 0,
-            cleanMode: modeSnapshot,
-            isDemoMode: demoSnapshot,
-            isUnread: true
-        )
-        upsertTaskRecord(record)
-
-        let engine = self.cleanerEngine
-        activeCleanTask = Task { [weak self] in
+        let mode = cleanMode
+        isCleaning = true; isStopping = false; phase = "正在复核清理项目…"; lastResults = []
+        let receiver = self
+        let worker = Task.detached(priority: .userInitiated) {
+            await cleaner.clean(items: targets, mode: mode) { completed, total, title in
+                await receiver.setPhase("\(completed)/\(total) · \(title)")
+            }
+        }
+        cleanTask = worker
+        Task { [weak self] in
+            let report = await worker.value
             guard let self else { return }
-
-            let results = await Task.detached(priority: .userInitiated) {
-                await engine.clean(items: targets, mode: modeSnapshot) { completed, total, phase, latestResult in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.activeCleanToken == token else { return }
-                        self.currentPhaseText = phase
-                        self.cleanProgressFraction = total > 0 ? Double(completed) / Double(total) : 0
-                        self.updateCleanTaskProgress(
-                            jobId: jobId,
-                            processed: completed,
-                            total: total,
-                            phaseText: phase,
-                            appendResult: latestResult
-                        )
-                    }
-                }
-            }.value
-
-            guard self.activeCleanToken == token, !Task.isCancelled else {
-                self.isCleaning = false
-                self.finishTaskRecord(
-                    jobId: jobId,
-                    status: .canceled,
-                    phaseText: "清理已中断，已完成项已生效",
-                    totalItems: targets.count,
-                    processedItems: results.count,
-                    bytesFreed: results.reduce(0) { $0 + $1.bytesFreed }
-                )
-                return
-            }
-
-            let succeededIDs = Set(zip(targets, results).compactMap { item, res in
-                res.success ? item.id : nil
-            })
-            let totalFreed = results.reduce(0) { $0 + $1.bytesFreed }
-            let failedCount = results.filter { !$0.success }.count
-
-            // Remove cleaned items from current list and cache
-            self.items.removeAll { succeededIDs.contains($0.id) }
-            if demoSnapshot {
-                self.cachedDemoItems = self.items
-            } else {
-                self.cachedRealItems = self.items
-            }
-
-            self.isCleaning = false
-            self.cleanProgressFraction = 1.0
+            self.lastResults = report.results
+            let finishedIDs = Set(zip(targets, report.results).compactMap { $0.1.success ? $0.0.id : nil })
+            self.items.removeAll { finishedIDs.contains($0.id) }
+            self.cleanTask = nil; self.isCleaning = false; self.isStopping = false
+            let amount = report.results.reduce(Int64(0)) { $0 + $1.processedBytes }
+            let failures = report.results.filter { !$0.success }.count
+            let action = mode == .moveToTrash ? "已移至废纸篓" : "已删除"
+            self.phase = "\(report.canceled ? "已停止" : "处理完成")：\(action) \(ByteFormatting.string(fromBytes: amount))，\(failures) 项未完成。"
+            if mode == .moveToTrash { self.phase += " 清空废纸篓后才可能释放空间。" }
+            self.record(mode.title, self.phase)
             self.diskUsage = DiskUsageInfo.current()
-
-            let finalStatus: TaskStatus = failedCount == 0
-                ? .succeeded
-                : (succeededIDs.isEmpty ? .failed : .partiallySucceeded)
-
-            let summaryMsg = demoSnapshot
-                ? "[演示预览完成] 已模拟释放 \(ByteFormatting.string(fromBytes: totalFreed))（真实磁盘未改动）"
-                : "清理完成！成功释放 \(ByteFormatting.string(fromBytes: totalFreed)) 空间\(failedCount > 0 ? "（\(failedCount) 项受限可查看消息盒子）" : "")"
-
-            self.currentPhaseText = summaryMsg
-            self.lastCleanSummaryBanner = summaryMsg
-
-            self.finishTaskRecord(
-                jobId: jobId,
-                status: finalStatus,
-                phaseText: summaryMsg,
-                totalItems: targets.count,
-                processedItems: results.count,
-                bytesFreed: totalFreed,
-                errorSummary: failedCount > 0 ? "\(failedCount) 个项目清理受限" : nil
-            )
+            await self.refreshRecovery()
         }
     }
 
-    public func cancelCleanIfNeeded() {
-        guard isCleaning else { return }
-        activeCleanToken = nil
-        activeCleanTask?.cancel()
-        activeCleanTask = nil
-        isCleaning = false
-        currentPhaseText = "已停止后续清理项目（已完成的项目已生效）"
+    private func setPhase(_ message: String) { if !isStopping { phase = message } }
+    public func toggle(_ id: UUID) {
+        guard !isBusy, let i = items.firstIndex(where: { $0.id == id }), !items[i].inspectionOnly else { return }
+        items[i].isSelected.toggle()
     }
-
-    // MARK: - Selection Helpers
-
-    public func toggleSelection(for itemID: String) {
-        guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
-        items[idx].isSelected.toggle()
+    public func selectRecommended() {
+        guard !isBusy else { return }
+        for i in items.indices { items[i].isSelected = items[i].tier == .safe && !items[i].inspectionOnly }
     }
-
-    public func selectAllSafeItems() {
-        for idx in items.indices {
-            items[idx].isSelected = (items[idx].tier == .safe)
-        }
+    public func clearSelection() {
+        guard !isBusy else { return }
+        for i in items.indices { items[i].isSelected = false }
     }
-
-    public func setAllSelection(in tier: CleanupTier, selected: Bool) {
-        for idx in items.indices where items[idx].tier == tier {
-            items[idx].isSelected = selected
-        }
+    public func refreshRecovery() async {
+        if let cleaner { recoveryEntries = await cleaner.reconcileRecovery() }
     }
-
-    public func revealInFinder(path: String) {
-        let expanded = (path as NSString).expandingTildeInPath
-        let url = URL(fileURLWithPath: expanded)
-        if FileManager.default.fileExists(atPath: expanded) {
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-        } else {
-            let parentURL = url.deletingLastPathComponent()
-            if FileManager.default.fileExists(atPath: parentURL.path) {
-                NSWorkspace.shared.open(parentURL)
-            }
-        }
-    }
-
-    public func resetConfigToDefault() {
-        config = .default
-    }
-
-    // MARK: - In-App Update Check & Safe Verification
-
-    public func checkForUpdates(manual: Bool = true) {
-        if case .checking = updateState { return }
-        if case .downloading = updateState { return }
-        if case .verifying = updateState { return }
-
-        updateState = .checking
-        if manual {
-            isUpdateSheetOpen = true
-        }
-
-        let feedURL = config.updateManifestURL
-        let channel = config.updateChannel
-        let service = self.updateService
-
+    public func restore(_ entry: RecoveryEntry) {
+        guard !isBusy, let cleaner else { return }
+        isRestoring = true
         Task { [weak self] in
             guard let self else { return }
-            let result = await service.fetchAndEvaluateManifest(
-                from: feedURL,
-                currentVersion: AppMetadata.version,
-                preferredChannel: channel
-            )
-            self.updateState = result
-
-            if case .updateAvailable(let manifest) = result {
-                if !self.announcedUpdateVersions.contains(manifest.version) {
-                    self.announcedUpdateVersions.insert(manifest.version)
-                    let record = TaskRecord(
-                        title: "发现新版本 MacSlim v\(manifest.version) (\(manifest.channel))",
-                        operationType: "update",
-                        status: .succeeded,
-                        phaseText: manifest.releaseNotes,
-                        isUnread: true
-                    )
-                    self.upsertTaskRecord(record)
-                }
-            }
+            do {
+                let warning = try await cleaner.restore(entry)
+                self.phase = warning ?? "已恢复至原位置，请重新扫描。"
+                self.items = []
+                self.record("恢复", warning ?? "已恢复一个废纸篓项目。")
+            } catch { self.phase = "恢复失败：\(error.localizedDescription)"; self.record("恢复失败", error.localizedDescription) }
+            await self.refreshRecovery()
+            self.isRestoring = false
         }
     }
-
-    public func downloadAndVerifyUpdate(_ manifest: ReleaseManifest, destinationDir: URL = URL(fileURLWithPath: "/tmp")) {
-        let jobId = UUID().uuidString
-        let record = TaskRecord(
-            jobId: jobId,
-            title: "下载并校验更新 MacSlim v\(manifest.version)",
-            operationType: "update",
-            status: .running,
-            phaseText: "正在从安全源下载并校验 SHA-256...",
-            isUnread: true
-        )
-        upsertTaskRecord(record)
-
-        let service = self.updateService
-        Task { [weak self] in
-            guard let self else { return }
-            let finalState = await service.downloadAndVerifyDMG(
-                manifest: manifest,
-                destinationDirectory: destinationDir
-            ) { phaseState in
-                Task { @MainActor [weak self] in
-                    self?.updateState = phaseState
-                }
-            }
-            self.updateState = finalState
-            switch finalState {
-            case .readyToInstall(let dmgPath, let m):
-                self.finishTaskRecord(
-                    jobId: jobId,
-                    status: .succeeded,
-                    phaseText: "v\(m.version) 校验通过（SHA-256 匹配），安装包位于 \(dmgPath)",
-                    totalItems: 1,
-                    processedItems: 1,
-                    bytesFreed: 0
-                )
-            case .failed(let reason, _):
-                self.finishTaskRecord(
-                    jobId: jobId,
-                    status: .failed,
-                    phaseText: reason,
-                    totalItems: 1,
-                    processedItems: 0,
-                    bytesFreed: 0,
-                    errorSummary: reason
-                )
-            default:
-                break
-            }
-        }
+    public func reveal(_ path: String) { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+    public func copyDiagnostics() {
+        let text = "MacSlim \(AppMetadata.version) (\(AppMetadata.buildNumber))\nmacOS \(UpdateEvaluator.detectedOSVersionString()) · \(UpdateEvaluator.detectedArchitecture())\n扫描项目 \(items.count) · 跳过/读取提示 \(warnings.count)\n运行状态：\(isBusy ? "处理中" : "空闲")\n最小体积 \(config.minCacheSizeMB) MB · 保留 \(config.minimumAgeDays) 天\n"
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
     }
-
-    public func openVerifiedUpdateDMG(path: String) {
-        let url = URL(fileURLWithPath: path)
-        if FileManager.default.fileExists(atPath: path) {
-            NSWorkspace.shared.open(url)
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-        }
+    private func record(_ title: String, _ detail: String) {
+        history.insert(OperationRecord(date: Date(), title: title, detail: detail), at: 0)
+        history = Array(history.prefix(30))
+        do {
+            try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+            try JSONEncoder().encode(history).write(to: storage.appendingPathComponent("operations-v1.json"), options: .atomic)
+        } catch { warnings.append("历史记录保存失败：\(error.localizedDescription)") }
     }
-
-    public func openReleasesWebPage() {
-        if let url = URL(string: AppMetadata.releasesPageURL) {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    // MARK: - Task Center Management & Persistence
-
-    public func markAllTasksRead() {
-        for idx in taskRecords.indices {
-            taskRecords[idx].isUnread = false
-        }
-        saveTaskHistory()
-    }
-
-    public func clearFinishedTaskHistory() {
-        taskRecords.removeAll { $0.status != .running && $0.status != .queued }
-        saveTaskHistory()
-    }
-
-    public func copyDiagnosticReportToClipboard() -> String {
-        let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
-        var sysinfo = utsname()
-        uname(&sysinfo)
-        let arch = withUnsafePointer(to: &sysinfo.machine) {
-            $0.withMemoryRebound(to: CChar.self, capacity: 1) {
-                String(validatingUTF8: $0) ?? "unknown"
-            }
-        }
-
-        let recentTasks = taskRecords.prefix(5).map { rec in
-            "- [\(rec.status.label)] \(rec.title) | 释放: \(ByteFormatting.string(fromBytes: rec.totalBytesFreed)) | 摘要: \(rec.phaseText)"
-        }.joined(separator: "\n")
-
-        let report = """
-        MacSlim 诊断摘要 (v\(AppMetadata.version) build \(AppMetadata.buildNumber))
-        系统版本: macOS \(osVersion) (\(arch))
-        磁盘状态: 可用 \(ByteFormatting.string(fromBytes: diskUsage.availableBytes)) / 总计 \(ByteFormatting.string(fromBytes: diskUsage.totalBytes))
-        当前模式: \(isDemoMode ? "演示预览模式" : "真实本机模式")
-        更新状态: \(updateState.badgeLabel) (通道: \(config.updateChannel))
-        配置快照: 最小缓存 \(config.minCacheSizeMB)MB | 休眠天数 \(config.dormantAppDaysThreshold)天 | 休眠体积 \(config.dormantAppMinSizeMB)MB
-        最近任务记录:
-        \(recentTasks.isEmpty ? "(暂无记录)" : recentTasks)
-        """
-
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(report, forType: .string)
-        return report
-    }
-
-    private func upsertTaskRecord(_ record: TaskRecord) {
-        if let idx = taskRecords.firstIndex(where: { $0.jobId == record.jobId }) {
-            taskRecords[idx] = record
-        } else {
-            taskRecords.insert(record, at: 0)
-        }
-        saveTaskHistory()
-    }
-
-    private func updateTaskPhase(jobId: String, phaseText: String) {
-        guard let idx = taskRecords.firstIndex(where: { $0.jobId == jobId }) else { return }
-        guard taskRecords[idx].status == .running else { return }
-        taskRecords[idx].phaseText = phaseText
-        taskRecords[idx].updatedAt = Date()
-    }
-
-    private func updateCleanTaskProgress(
-        jobId: String,
-        processed: Int,
-        total: Int,
-        phaseText: String,
-        appendResult: CleanedItemResult?
-    ) {
-        guard let idx = taskRecords.firstIndex(where: { $0.jobId == jobId }) else { return }
-        guard taskRecords[idx].status == .running else { return }
-        taskRecords[idx].processedItemsCount = processed
-        taskRecords[idx].totalItemsCount = total
-        taskRecords[idx].phaseText = phaseText
-        taskRecords[idx].updatedAt = Date()
-        if let res = appendResult {
-            taskRecords[idx].itemResults.append(res)
-            taskRecords[idx].totalBytesFreed += res.bytesFreed
-        }
-    }
-
-    private func finishTaskRecord(
-        jobId: String,
-        status: TaskStatus,
-        phaseText: String,
-        totalItems: Int,
-        processedItems: Int,
-        bytesFreed: Int64,
-        errorSummary: String? = nil
-    ) {
-        guard let idx = taskRecords.firstIndex(where: { $0.jobId == jobId }) else { return }
-        taskRecords[idx].status = status
-        taskRecords[idx].phaseText = phaseText
-        taskRecords[idx].totalItemsCount = totalItems
-        taskRecords[idx].processedItemsCount = processedItems
-        taskRecords[idx].totalBytesFreed = bytesFreed
-        taskRecords[idx].errorSummary = errorSummary
-        taskRecords[idx].updatedAt = Date()
-        saveTaskHistory()
-    }
-
-    private func loadConfig() {
-        let url = storageDirectoryURL.appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode(ScannerConfig.self, from: data) else {
-            return
-        }
-        self.config = decoded
-    }
-
     private func saveConfig() {
-        try? FileManager.default.createDirectory(at: storageDirectoryURL, withIntermediateDirectories: true)
-        let url = storageDirectoryURL.appendingPathComponent("config.json")
-        if let data = try? JSONEncoder().encode(config) {
-            try? data.write(to: url, options: .atomic)
-        }
+        do {
+            try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+            try JSONEncoder().encode(config).write(to: storage.appendingPathComponent("config.json"), options: .atomic)
+        } catch { warnings.append("设置保存失败：\(error.localizedDescription)") }
     }
 
-    private func loadTaskHistoryAndReconcileStaleTasks() {
-        let url = storageDirectoryURL.appendingPathComponent("task_history.json")
-        guard let data = try? Data(contentsOf: url),
-              var decoded = try? JSONDecoder().decode([TaskRecord].self, from: data) else {
-            return
-        }
-        // Reconcile any lingering .running tasks from a prior process session
-        var modified = false
-        for idx in decoded.indices where decoded[idx].status == .running || decoded[idx].status == .queued {
-            decoded[idx].status = .canceled
-            decoded[idx].phaseText = "上次应用会话退出，任务已中断"
-            decoded[idx].updatedAt = Date()
-            modified = true
-        }
-        self.taskRecords = decoded
-        if modified {
-            saveTaskHistory()
+    public func checkForUpdates() {
+        showUpdate = true
+        guard updateTask == nil else { return }
+        updateState = .checking
+        let service = updateService
+        updateTask = Task { [weak self] in
+            let result = await service.fetchAndEvaluateManifest(from: AppMetadata.defaultUpdateManifestURL)
+            self?.updateState = result; self?.updateTask = nil
         }
     }
-
-    private func saveTaskHistory() {
-        try? FileManager.default.createDirectory(at: storageDirectoryURL, withIntermediateDirectories: true)
-        let url = storageDirectoryURL.appendingPathComponent("task_history.json")
-        let trimmed = Array(taskRecords.prefix(30))
-        if let data = try? JSONEncoder().encode(trimmed) {
-            try? data.write(to: url, options: .atomic)
+    public func downloadUpdate(_ manifest: ReleaseManifest) {
+        guard updateTask == nil else { return }
+        let service = updateService
+        let receiver = self
+        updateState = .downloading(progress: 0, targetVersion: manifest.version)
+        updateTask = Task { [weak self] in
+            let result = await service.downloadAndVerifyDMG(manifest: manifest) { state in
+                await receiver.setUpdateState(state)
+            }
+            self?.updateState = result; self?.updateTask = nil
         }
+    }
+    private func setUpdateState(_ state: UpdateState) { updateState = state }
+    public func openUpdate(_ path: String) {
+        guard !isBusy else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 }

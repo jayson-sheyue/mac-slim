@@ -1,25 +1,20 @@
 # Changelog
 
-All notable changes to **MacSlim (Mac 瘦身助手)** are documented in this file.
-This project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
+## 1.1.0 — 本地候选版本
 
-## [1.0.0] - 2026-11-03
+- 按 ShipIt、Sparkle、更新包、缓存和日志的目录结构识别应用，移除针对个人开发环境的排除项。
+- 将产品收敛为四类数据检查与清理，移除 Cursor 数据库重建、休眠应用卸载和首页演示数据。
+- 旧版框架保留检测与访达定位，设为仅检查，避免修改应用包和签名。
+- 未知缓存和开发缓存默认不选，保留近期文件、个人数据特征、符号链接重定向和其他卷的内容。
+- Playwright 根据包引用保留正在使用的版本；引用不完整和 Playwright-Go 运行时不清理。
+- 清理前复核路径、文件身份、内容与运行状态；取消实际工作任务，等待退出后才解除操作锁定。
+- 修正废纸篓、缺失文件和估算体积的统计；加入持久恢复记录与冲突保护。
+- 精简界面与设置，保留清理记录、恢复、诊断摘要和手动更新。
+- 更新下载改为文件下载与分块校验，核对体积、平台和版本，隔离临时目录，保留系统安全标记。
+- 重建隔离回归测试，修正 CI 哈希路径，加入 Intel 与其他 macOS runner 检查配置。
 
-### Added
-- **双级安全分类扫描引擎 (`ScannerEngine`)**：
-  - 🟢 **完全无感项（默认勾选）**：
-    - 自动识别 Electron `ShipIt`（Claude、Cursor、VS Code、Trae 等）、`Sparkle`（ChatGPT/Codex）、腾讯会议 `UpdatePackages`、飞书 `LarkShell/update`、`GoogleUpdater/crx_cache` 自动更新残留包。
-    - 精准扫描 `/Applications/*.app/Contents/Frameworks/*.framework/Versions/` 下非 `Current` 符号链接指向的旧版冗余内核框架（严格保护 Apple Code Signature，不修改二进制可执行文件架构）。
-    - 扫描 Chrome `Service Worker/CacheStorage` 离线静态资源膨胀及常见办公软件 `~/Library/Caches` 可再生缓存。
-    - 扫描 `~/Library/Logs` 应用日志、崩溃转储及 `pip`、`Homebrew`、`Playwright`、`node-gyp` 历史下载缓存。
-  - 🟡 **深度瘦身项（默认不勾选，附明确影响提示）**：
-    - **Cursor `state.vscdb` 状态库原子无损重组**：100% 导出并保留 `ItemTable`（账号登录、UI 布局与插件状态），清空膨胀的 `cursorDiskKV` 历史对话气泡表，重组前后自动校验 `ItemTable` 行数一致性。
-    - **长期休眠大型应用检测**：基于 Spotlight `kMDItemLastUsedDate` 与包修改时间识别超过 180 天未打开的大体积应用及关联容器（清理时自动跳过受系统保护的 `.com.apple.containermanagerd.metadata.plist`）。
-- **双重安全清理模式 (`CleanerEngine`)**：
-  - 支持 **「移至废纸篓（推荐，可随时恢复）」** 与 **「直接永久清理」**，对深度瘦身项永久清理提供二次安全确认拦截。
-- **79.3 GB 典型膨胀案例演示预览**：
-  - 支持一键切换「真实本机扫描」与「79GB 案例预览」，演示模式带醒目横幅标识且绝不修改本机磁盘。
-- **持久化全局任务中心（消息盒子）与一键诊断导出 (`AppStore`)**：
-  - 跨视图切换保持扫描结果缓存，使用所有权令牌 (`activeScanToken` / `activeCleanToken`) 防止并发竞态，支持一键复制环境与任务诊断摘要。
-- **应用内安全更新与完整性校验 (`UpdateManager`)**：
-  - 遵循 SemVer 2.0.0 版本比较与 `stable`/`beta` 通道过滤，下载 `.dmg` 更新包时强制校验 `CryptoKit.SHA256` 摘要，损坏包自动拒绝并清理临时文件。
+此版本尚未公开发布。Developer ID、公证、最低系统实机与干净环境升级验收仍需完成。
+
+## 1.0.0
+
+首个原生 Universal 版本。包含更新残留、缓存、日志、数据库重建与休眠应用识别。后两项已在 1.1.0 中移除。

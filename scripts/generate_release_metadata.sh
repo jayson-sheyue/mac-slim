@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
 VERSION="$(tr -d '[:space:]' < "${PROJECT_DIR}/VERSION")"
-BUILD_NUMBER="100"
+BUILD_NUMBER="110"
 DIST_DIR="${PROJECT_DIR}/dist"
 DMG_NAME="MacSlim-${VERSION}-Universal.dmg"
 DMG_PATH="${DIST_DIR}/${DMG_NAME}"
@@ -35,7 +35,7 @@ cat > "${DIST_DIR}/release-manifest.json" << EOF
   "dmgUrl": "https://github.com/${REPO_SLUG}/releases/download/v${VERSION}/${DMG_NAME}",
   "sha256": "${SHA256_HASH}",
   "sizeBytes": ${SIZE_BYTES},
-  "releaseNotes": "MacSlim v${VERSION} 正式发布：支持 6 大无损清理规则（Electron ShipIt/Sparkle 更新残留、Chrome 多版本冗余内核、Service Worker 离线缓存、日志与开发缓存、Cursor state.vscdb 原子无损重组、长期休眠应用识别），内置废纸篓回退保护与应用内 SHA-256 完整性校验更新。"
+  "releaseNotes": "MacSlim v${VERSION}：按目录结构识别更新残留、应用缓存和历史日志；增加执行前复核、可靠取消、废纸篓恢复和 Playwright 引用保护。旧版内核仅供检查，不修改应用包。移除数据库重建与休眠应用卸载。"
 }
 EOF
 

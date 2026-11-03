@@ -36,6 +36,7 @@ func renderIcon(size: Int) -> Data? {
     NSGraphicsContext.current = ctx
     let cg = ctx.cgContext
 
+    cg.clear(CGRect(x: 0, y: 0, width: size, height: size))
     let s = CGFloat(size)
     let inset = s * 0.08
     let rect = CGRect(x: inset, y: inset, width: s - inset * 2, height: s - inset * 2)
@@ -136,10 +137,26 @@ let specs: [(name: String, pixels: Int)] = [
     ("icon_512x512@2x.png", 1024)
 ]
 
-for spec in specs {
+// Build an ICNS container directly from the generated PNG chunks.
+let chunkTypes = ["icp4", "ic11", "icp5", "ic12", "ic07", "ic13", "ic08", "ic14", "ic09", "ic10"]
+var chunks = Data()
+func appendLength(_ length: Int, to data: inout Data) {
+    var bigEndian = UInt32(length).bigEndian
+    withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
+}
+for (index, spec) in specs.enumerated() {
     if let pngData = renderIcon(size: spec.pixels) {
         let outURL = URL(fileURLWithPath: iconsetPath).appendingPathComponent(spec.name)
         try pngData.write(to: outURL)
+        chunks.append(contentsOf: chunkTypes[index].utf8)
+        appendLength(pngData.count + 8, to: &chunks)
+        chunks.append(pngData)
     }
+}
+if args.count >= 3 {
+    var icns = Data("icns".utf8)
+    appendLength(chunks.count + 8, to: &icns)
+    icns.append(chunks)
+    try icns.write(to: URL(fileURLWithPath: args[2]))
 }
 print("Generated iconset at \(iconsetPath)")

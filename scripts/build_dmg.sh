@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
 VERSION="$(tr -d '[:space:]' < "${PROJECT_DIR}/VERSION")"
-BUILD_NUMBER="100"
+BUILD_NUMBER="110"
 BUILD_DIR="${PROJECT_DIR}/build"
 DIST_DIR="${PROJECT_DIR}/dist"
 APP_NAME="MacSlim"
@@ -12,7 +12,7 @@ APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 DMG_STAGING="${BUILD_DIR}/dmg_staging"
 DMG_NAME="${APP_NAME}-${VERSION}-Universal.dmg"
 DMG_PATH="${DIST_DIR}/${DMG_NAME}"
-MODULE_CACHE="/tmp/swift-module-cache"
+MODULE_CACHE="${PROJECT_DIR}/.build/module-cache"
 REPO_SLUG="${GITHUB_REPOSITORY:-jayson-sheyue/mac-slim}"
 
 echo "==> [1/6] Running fast checks & automated test suite (v${VERSION})..."
@@ -26,14 +26,15 @@ ICONSET_DIR="${BUILD_DIR}/AppIcon.iconset"
 /usr/bin/swiftc -module-cache-path "${MODULE_CACHE}" \
     "${PROJECT_DIR}/scripts/generate_icon.swift" \
     -o "${BUILD_DIR}/generate_icon"
-"${BUILD_DIR}/generate_icon" "${ICONSET_DIR}"
+"${BUILD_DIR}/generate_icon" "${ICONSET_DIR}" "${BUILD_DIR}/AppIcon.icns"
 
 mkdir -p "${APP_BUNDLE}/Contents/MacOS"
 mkdir -p "${APP_BUNDLE}/Contents/Resources"
-/usr/bin/iconutil -c icns "${ICONSET_DIR}" -o "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
+cp "${BUILD_DIR}/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 
 echo "==> [3/6] Compiling Universal (arm64 + x86_64) native binary..."
 SOURCES=(
+    "${PROJECT_DIR}/Sources/FileSafety.swift"
     "${PROJECT_DIR}/Sources/Models.swift"
     "${PROJECT_DIR}/Sources/UpdateManager.swift"
     "${PROJECT_DIR}/Sources/ScannerEngine.swift"
@@ -43,12 +44,12 @@ SOURCES=(
     "${PROJECT_DIR}/Sources/MacSlimApp.swift"
 )
 
-/usr/bin/swiftc -O -module-cache-path "${MODULE_CACHE}" \
+/usr/bin/swiftc -swift-version 6 -warnings-as-errors -O -module-cache-path "${MODULE_CACHE}" \
     -target arm64-apple-macosx13.0 \
     "${SOURCES[@]}" \
     -o "${BUILD_DIR}/${APP_NAME}_arm64"
 
-/usr/bin/swiftc -O -module-cache-path "${MODULE_CACHE}" \
+/usr/bin/swiftc -swift-version 6 -warnings-as-errors -O -module-cache-path "${MODULE_CACHE}" \
     -target x86_64-apple-macosx13.0 \
     "${SOURCES[@]}" \
     -o "${BUILD_DIR}/${APP_NAME}_x86_64"
@@ -123,6 +124,7 @@ if [[ "${SKIP_HDIUTIL:-0}" != "1" ]]; then
         -format UDZO \
         "${DMG_PATH}"
     "${PROJECT_DIR}/scripts/generate_release_metadata.sh"
+    "${PROJECT_DIR}/scripts/verify_release.sh"
     rm -rf "${BUILD_DIR}"
     echo "==> Build & Release Metadata Complete!"
     ls -lh "${DIST_DIR}"

@@ -2,285 +2,271 @@ import Foundation
 import CryptoKit
 
 @main
-struct MacSlimTestRunner {
+struct MacSlimTests {
+    @MainActor
     static func main() async {
-        print("=== MacSlim Automated Verification Suite ===")
         var passed = 0
         var failed = 0
-
-        func assertCondition(_ condition: @autoclosure () -> Bool, _ message: String) {
-            if condition() {
-                passed += 1
-                print("  [PASS] \(message)")
-            } else {
-                failed += 1
-                print("  [FAIL] \(message)")
-            }
+        func check(_ value: Bool, _ message: String) {
+            if value { passed += 1; print("[PASS] " + message) }
+            else { failed += 1; print("[FAIL] " + message) }
         }
-
         let fm = FileManager.default
-        let tempRoot = URL(fileURLWithPath: "/tmp/macslim_test_\(UUID().uuidString)", isDirectory: true)
-        let fakeHome = tempRoot.appendingPathComponent("Home", isDirectory: true)
-        let fakeApps = tempRoot.appendingPathComponent("Applications", isDirectory: true)
-        let fakeStorage = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
-
-        defer {
-            try? fm.removeItem(at: tempRoot)
+        let root = URL(fileURLWithPath: FileSafety.canonicalPath(fm.temporaryDirectory.appendingPathComponent("macslim-tests-" + UUID().uuidString).path))
+        defer { try? fm.removeItem(at: root) }
+        let home = root.appendingPathComponent("用户 Home").path
+        let applications = root.appendingPathComponent("Applications").path
+        let trash = root.appendingPathComponent("Trash").path
+        let oldDate = Date().addingTimeInterval(-60 * 86400)
+        let env = ScanEnvironment(homeDirectory: home, applicationDirectories: [applications])
+        let inactive: @Sendable () -> ActivitySnapshot = { ActivitySnapshot() }
+        func dir(_ path: String) throws { try fm.createDirectory(atPath: path, withIntermediateDirectories: true) }
+        func file(_ path: String, old: Bool = true, megabytes: Int = 1) throws {
+            try dir(URL(fileURLWithPath: path).deletingLastPathComponent().path)
+            try Data(repeating: 65, count: megabytes * 1024 * 1024).write(to: URL(fileURLWithPath: path))
+            if old { try fm.setAttributes([.modificationDate: oldDate], ofItemAtPath: path) }
         }
-
+        func ageTree(_ path: String) throws {
+            if let e = fm.enumerator(atPath: path) {
+                for case let child as String in e {
+                    let p = path + "/" + child
+                    if (try fm.attributesOfItem(atPath: p)[.type]) as? FileAttributeType != .typeSymbolicLink {
+                        try fm.setAttributes([.modificationDate: oldDate], ofItemAtPath: p)
+                    }
+                }
+            }
+            try fm.setAttributes([.modificationDate: oldDate], ofItemAtPath: path)
+        }
+        func item(_ path: String, tier: CleanupTier = .safe, category: CleanupCategory = .browserAndAppCache) throws -> ScanItem {
+            ScanItem(title: URL(fileURLWithPath: path).lastPathComponent, appName: "Fixture", category: category, tier: tier, path: path,
+                     reason: "fixture", impactNote: "fixture", stamp: try FileSafety.tree(path))
+        }
         do {
-            try fm.createDirectory(at: fakeHome, withIntermediateDirectories: true)
-            try fm.createDirectory(at: fakeApps, withIntermediateDirectories: true)
-            try fm.createDirectory(at: fakeStorage, withIntermediateDirectories: true)
+            try dir(home); try dir(applications); try dir(trash)
+            for path in env.writableRoots { try dir(path) }
+            let shipit = home + "/Library/Caches/io.example.NovelEditor.ShipIt/update.old"
+            try file(shipit + "/NovelEditor.app/Contents/MacOS/NovelEditor")
+            try fm.createSymbolicLink(atPath: shipit + "/link", withDestinationPath: "NovelEditor.app")
+            var times = [timeval(tv_sec: Int(oldDate.timeIntervalSince1970), tv_usec: 0), timeval(tv_sec: Int(oldDate.timeIntervalSince1970), tv_usec: 0)]
+            _ = (shipit + "/link").withCString { lutimes($0, &times) }
+            try ageTree(shipit)
+            let recentShipit = home + "/Library/Caches/io.example.NovelEditor.ShipIt/update.recent"
+            try file(recentShipit + "/updater.bin", old: false)
+            let sparkle = home + "/Library/Caches/io.example.Unlisted/org.sparkle-project.Sparkle/Installation/archive.zip"
+            try file(sparkle)
+            let meeting = home + "/Library/Containers/io.example.conference/Data/Library/Global/UpdatePackages/previous.pkg"
+            try file(meeting)
+            let containerSparkle = home + "/Library/Containers/io.example.sparkle/Data/Library/Caches/io.example.sparkle/org.sparkle-project.Sparkle/Installation/old.zip"
+            try file(containerSparkle)
+            let lark = home + "/Library/Application Support/LarkShell/update/old.pkg"
+            try file(lark)
+            let google = home + "/Library/Application Support/Google/GoogleUpdater/crx_cache/old.crx"
+            try file(google)
+            let cache = home + "/Library/Caches/io.example.UnknownCache/历史 缓存.bin"
+            try file(cache)
+            let appCache = home + "/Library/Application Support/NovelEditor/Cache/render.bin"
+            try file(appCache)
+            let log = home + "/Library/Logs/中文 空格 App/debug.log"
+            try file(log)
+            let recentLog = home + "/Library/Logs/中文 空格 App/today.log"
+            try file(recentLog, old: false)
+            let swCache = home + "/Library/Application Support/BrowserVendor/Browser/Profile 2/Service Worker/CacheStorage/site-cache"
+            try file(swCache + "/resources.bin"); try ageTree(swCache)
+            let cookies = home + "/Library/Caches/io.example.credentials/session/Cookies"
+            try file(cookies); try ageTree(URL(fileURLWithPath: cookies).deletingLastPathComponent().path)
+            let cookieWAL = home + "/Library/Caches/io.example.credentials/Cookies-wal"
+            try file(cookieWAL)
+            let privateDB = home + "/Library/Application Support/NovelEditor/User/globalStorage/state.vscdb"
+            try file(privateDB)
+            let lockedLogs = home + "/Library/Logs/Locked"
+            try dir(lockedLogs)
+            try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedLogs)
+            defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedLogs) }
+            let privateChat = home + "/Library/Application Support/NovelEditor/chats/messages.sqlite"
+            try file(privateChat)
+            let pwGo = home + "/Library/Caches/ms-playwright-go/driver-1/node"
+            try file(pwGo)
+            let pwRoot = home + "/Library/Caches/ms-playwright"
+            try dir(pwRoot + "/.links")
+            let package = root.appendingPathComponent("playwright package").path
+            try dir(package)
+            try Data("{\"browsers\":[{\"name\":\"chromium\",\"revision\":\"1200\",\"revisionOverrides\":{\"mac\":\"1201\"}}]}".utf8).write(to: URL(fileURLWithPath: package + "/browsers.json"))
+            try Data(package.utf8).write(to: URL(fileURLWithPath: pwRoot + "/.links/project"))
+            for rev in ["1199", "1200", "1201"] { try file(pwRoot + "/chromium-" + rev + "/chrome"); try ageTree(pwRoot + "/chromium-" + rev) }
+            let app = applications + "/NovelEditor.app"
+            let versions = app + "/Contents/Frameworks/Engine.framework/Versions"
+            try file(versions + "/1.0/Engine"); try file(versions + "/2.0/Engine")
+            try fm.createSymbolicLink(atPath: versions + "/Current", withDestinationPath: "2.0")
+            let plist: [String: Any] = ["CFBundleIdentifier": "io.example.NovelEditor", "CFBundleDisplayName": "NovelEditor"]
+            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: URL(fileURLWithPath: app + "/Contents/Info.plist"))
+            let scanner = ScannerEngine(environment: env, activity: inactive)
+            let report = await scanner.scan(config: ScannerConfig(minCacheSizeMB: 1, minimumAgeDays: 14)) { _ in }
+            func found(_ path: String) -> ScanItem? { report.items.first { $0.path == path } }
+            check(report.warnings.contains { $0.contains("Locked") }, "Permission-denied directory reported instead of claiming complete scan")
+            check(found(shipit)?.isSelected == true, "Unlisted Electron app: old ShipIt archive discovered and selected")
+            check(found(recentShipit) == nil, "Recently written updater is preserved")
+            check(found(sparkle)?.category == .updaterLeftovers, "Unlisted Sparkle app discovered structurally")
+            check(found(meeting)?.category == .updaterLeftovers, "Generic sandbox UpdatePackages discovered")
+            check(found(containerSparkle)?.category == .updaterLeftovers, "Sparkle updater discovered inside generic sandbox cache")
+            check(found(lark) != nil && found(google) != nil, "Lark and Google updater archives discovered")
+            check(found(cache)?.tier == .review && found(cache)?.isSelected == false, "Unknown application cache requires review")
+            check(found(appCache)?.tier == .review, "Unlisted Application Support cache discovered")
+            check(found(log)?.isSelected == true && found(recentLog) == nil, "Old Chinese/space-path logs selected; recent log preserved")
+            check(found(swCache)?.tier == .review, "Generic Chromium profile CacheStorage discovered without browser-name whitelist")
+            check(!report.items.contains { $0.path == cookies || FileSafety.isBelow(cookies, $0.path) }, "Cookie-containing cache subtree is protected")
+            check(found(cookieWAL) == nil, "Cookie WAL sidecar is protected even without the primary database")
+            check(found(privateDB) == nil && found(privateChat) == nil, "Databases and chats are never candidates")
+            check(!report.items.contains { $0.path.contains("ms-playwright-go") }, "Playwright-Go runtime protected")
+            check(found(pwRoot + "/chromium-1199") != nil, "Unreferenced old Playwright version identified")
+            check(found(pwRoot + "/chromium-1200") == nil && found(pwRoot + "/chromium-1201") == nil, "Referenced and platform override Playwright versions protected")
+            check(found(versions + "/1.0")?.inspectionOnly == true && found(versions + "/2.0") == nil, "Old framework is inspection-only; Current is preserved")
 
-            // Helper to write a file of a specific size
-            func writeDummyFile(at url: URL, sizeMB: Int) throws {
-                try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let data = Data(repeating: 0x41, count: sizeMB * 1024 * 1024)
-                try data.write(to: url)
+            let recovery = try RecoveryStore(directory: root.appendingPathComponent("Recovery"))
+            let cleaner = CleanerEngine(environment: env, recovery: recovery, activity: inactive, testTrashDirectory: trash)
+            if let framework = found(versions + "/1.0") {
+                try fm.removeItem(atPath: versions + "/Current")
+                try fm.createSymbolicLink(atPath: versions + "/Current", withDestinationPath: "1.0")
+                let r = await cleaner.cleanItem(framework, mode: .permanentDelete)
+                check(!r.success && fm.fileExists(atPath: versions + "/Current/Engine"), "Changed Current cannot trigger framework deletion")
+            } else { check(false, "Framework fixture found") }
+            if let archive = found(shipit) {
+                let r = await cleaner.cleanItem(archive, mode: .moveToTrash)
+                let entries = await recovery.all()
+                check(r.success && !fm.fileExists(atPath: shipit) && entries.count == 1 && entries[0].state == .trashed, "Trash action records actual destination before reporting success")
+                let reopened = try RecoveryStore(directory: root.appendingPathComponent("Recovery"))
+                check(await reopened.all().count == 1, "Recovery journal survives restart")
+                try await cleaner.restore(entries[0])
+                check(fm.fileExists(atPath: shipit + "/NovelEditor.app/Contents/MacOS/NovelEditor"), "Trash restore returns full archive and nested symlink to original path")
             }
+            let conflict = home + "/Library/Caches/Fixture/conflict.bin"
+            try file(conflict)
+            let conflictResult = await cleaner.cleanItem(try item(conflict), mode: .moveToTrash)
+            guard let conflictEntry = await recovery.all().first(where: { $0.originalPath == conflict }) else { throw SafetyError.refused("Trash fixture failed: " + conflictResult.message) }
+            try Data("new user content".utf8).write(to: URL(fileURLWithPath: conflict))
+            do { try await cleaner.restore(conflictEntry); check(false, "Restore must reject destination conflict") }
+            catch { check(try String(contentsOfFile: conflict, encoding: .utf8) == "new user content", "Restore never overwrites new destination content") }
+            let modifiedTrash = home + "/Library/Caches/Fixture/modified-trash.bin"
+            try file(modifiedTrash)
+            _ = await cleaner.cleanItem(try item(modifiedTrash), mode: .moveToTrash)
+            if let entry = await recovery.all().first(where: { $0.originalPath == modifiedTrash }), let path = entry.trashPath {
+                try Data("external change".utf8).write(to: URL(fileURLWithPath: path))
+                do { try await cleaner.restore(entry); check(false, "Modified trash must be rejected") }
+                catch { check(!fm.fileExists(atPath: modifiedTrash), "Externally modified trash is not silently restored") }
+            } else { check(false, "Modified trash fixture created") }
+            let changed = home + "/Library/Caches/Fixture/changed.bin"
+            try file(changed)
+            let before = try item(changed)
+            try Data("new content".utf8).write(to: URL(fileURLWithPath: changed))
+            let changedResult = await cleaner.cleanItem(before, mode: .permanentDelete)
+            check(!changedResult.success && fm.fileExists(atPath: changed), "Changed candidate rejected at execution")
+            let vanished = home + "/Library/Caches/Fixture/vanished.bin"
+            try file(vanished); let vanishedItem = try item(vanished); try fm.removeItem(atPath: vanished)
+            let vanishedResult = await cleaner.cleanItem(vanishedItem, mode: .permanentDelete)
+            check(!vanishedResult.success && vanishedResult.processedBytes == 0, "Missing candidate never reports freed bytes")
+            let redirected = home + "/Library/Caches/redirect"
+            let documents = home + "/Documents"
+            try file(documents + "/keep.txt")
+            try fm.createSymbolicLink(atPath: redirected, withDestinationPath: documents)
+            let redirectedItem = ScanItem(title: "redirect", appName: "Fixture", category: .browserAndAppCache, tier: .review,
+                path: redirected + "/keep.txt", reason: "", impactNote: "", stamp: try FileSafety.tree(documents + "/keep.txt"))
+            let redirectedResult = await cleaner.cleanItem(redirectedItem, mode: .permanentDelete)
+            check(!redirectedResult.success && fm.fileExists(atPath: documents + "/keep.txt"), "Symlink redirection to documents rejected")
+            let busyPath = home + "/Library/Caches/NovelEditor/busy.bin"
+            try file(busyPath)
+            let busy = ScanItem(title: "busy", appName: "NovelEditor", category: .browserAndAppCache, tier: .review,
+                path: busyPath, reason: "", impactNote: "", stamp: try FileSafety.tree(busyPath), ownerBundleIDs: ["io.example.NovelEditor"])
+            let busyCleaner = CleanerEngine(environment: env, recovery: recovery, activity: { ActivitySnapshot(apps: [RunningApplication(bundleID: "io.example.NovelEditor", path: app)]) }, testTrashDirectory: trash)
+            let busyResult = await busyCleaner.cleanItem(busy, mode: .permanentDelete)
+            check(!busyResult.success && fm.fileExists(atPath: busyPath), "Running owner app blocks cleanup")
+            let uncertainCleaner = CleanerEngine(environment: env, recovery: recovery, activity: { ActivitySnapshot(reliable: false) }, testTrashDirectory: trash)
+            check(!(await uncertainCleaner.cleanItem(busy, mode: .permanentDelete)).success, "Unknown process state fails closed")
 
-            // 1. Setup Rule 1: ShipIt updater leftover (6 MB)
-            let shipItFile = fakeHome.appendingPathComponent("Library/Caches/com.anthropic.claudefordesktop.ShipIt/update.a1b2c3d/Claude.app/UpdateBundle.zip")
-            try writeDummyFile(at: shipItFile, sizeMB: 6)
-
-            // 2. Setup Rule 2: Redundant Framework Versions inside MockBrowser.app
-            let versionsDir = fakeApps.appendingPathComponent("MockBrowser.app/Contents/Frameworks/MockEngine.framework/Versions", isDirectory: true)
-            let oldVerFile = versionsDir.appendingPathComponent("130.0.1/MockEngineBinary")
-            let currentVerFile = versionsDir.appendingPathComponent("131.0.2/MockEngineBinary")
-            try writeDummyFile(at: oldVerFile, sizeMB: 5)
-            try writeDummyFile(at: currentVerFile, sizeMB: 5)
-            let currentSymlink = versionsDir.appendingPathComponent("Current")
-            try fm.createSymbolicLink(atPath: currentSymlink.path, withDestinationPath: "131.0.2")
-
-            // 3. Setup Rule 3: Chrome Service Worker CacheStorage (7 MB)
-            let swCacheFile = fakeHome.appendingPathComponent("Library/Application Support/Google/Chrome/Default/Service Worker/CacheStorage/blob_01.dat")
-            try writeDummyFile(at: swCacheFile, sizeMB: 7)
-
-            // 4. Setup Rule 4: Logs directory with Chinese & spaces in path (6 MB)
-            let logFile = fakeHome.appendingPathComponent("Library/Logs/中文 空格测试应用/debug.log")
-            try writeDummyFile(at: logFile, sizeMB: 6)
-
-            // 5. Setup Rule 5: Cursor state.vscdb with ItemTable + bloated cursorDiskKV (3 MB)
-            let cursorDBDir = fakeHome.appendingPathComponent("Library/Application Support/Cursor/User/globalStorage", isDirectory: true)
-            try fm.createDirectory(at: cursorDBDir, withIntermediateDirectories: true)
-            let cursorDBPath = cursorDBDir.appendingPathComponent("state.vscdb").path
-            let initSQL = """
-            CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);
-            CREATE TABLE cursorDiskKV (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB);
-            INSERT INTO ItemTable VALUES ('cursorAuth/accessToken', 'secret_jwt_token_123');
-            INSERT INTO ItemTable VALUES ('workbench.panel.state', '{"visible":true}');
-            INSERT INTO ItemTable VALUES ('user.preferences.theme', 'Default Dark+');
-            INSERT INTO cursorDiskKV VALUES ('bubble_1', zeroblob(1500000));
-            INSERT INTO cursorDiskKV VALUES ('bubble_2', zeroblob(1500000));
-            """
-            _ = runSQLite(dbPath: cursorDBPath, sql: initSQL)
-
-            // 6. Setup Rule 6: Dormant App (> 180 days old) + Container with protected metadata plist
-            let dormantAppDir = fakeApps.appendingPathComponent("DormantSuite.app", isDirectory: true)
-            let dormantBinary = dormantAppDir.appendingPathComponent("Contents/MacOS/DormantSuite")
-            try writeDummyFile(at: dormantBinary, sizeMB: 6)
-            let infoPlistURL = dormantAppDir.appendingPathComponent("Contents/Info.plist")
-            let plistDict: [String: Any] = [
-                "CFBundleIdentifier": "com.example.dormantsuite",
-                "CFBundleDisplayName": "DormantSuite"
-            ]
-            let plistData = try PropertyListSerialization.data(fromPropertyList: plistDict, format: .xml, options: 0)
-            try plistData.write(to: infoPlistURL)
-
-            // Backdate DormantSuite.app modification/access time to 240 days ago
-            let oldDate = Date().addingTimeInterval(-240 * 86400)
-            try fm.setAttributes([.modificationDate: oldDate], ofItemAtPath: dormantAppDir.path)
-            var tv = [
-                timeval(tv_sec: Int(oldDate.timeIntervalSince1970), tv_usec: 0),
-                timeval(tv_sec: Int(oldDate.timeIntervalSince1970), tv_usec: 0)
-            ]
-            _ = dormantAppDir.path.withCString { cPath in
-                utimes(cPath, &tv)
+            let cancelA = home + "/Library/Caches/Fixture/cancelA.bin"
+            let cancelB = home + "/Library/Caches/Fixture/cancelB.bin"
+            try file(cancelA); try file(cancelB)
+            let cancelTargets = try [item(cancelA), item(cancelB)]
+            let worker = Task.detached {
+                await cleaner.clean(items: cancelTargets, mode: .permanentDelete) { completed, _, _ in
+                    if completed == 1 { withUnsafeCurrentTask { $0?.cancel() } }
+                }
             }
-
-            let containerDir = fakeHome.appendingPathComponent("Library/Containers/com.example.dormantsuite", isDirectory: true)
-            let protectedPlist = containerDir.appendingPathComponent(".com.apple.containermanagerd.metadata.plist")
-            let containerCache = containerDir.appendingPathComponent("Data/Library/Caches/payload.bin")
-            try writeDummyFile(at: protectedPlist, sizeMB: 1)
-            try writeDummyFile(at: containerCache, sizeMB: 4)
-
-            // --- Run ScannerEngine ---
-            let env = ScanEnvironment(homeDirectory: fakeHome.path, applicationsDirectory: fakeApps.path)
-            let scanner = ScannerEngine(environment: env)
-            let testConfig = ScannerConfig(
-                minCacheSizeMB: 2,
-                dormantAppDaysThreshold: 180,
-                dormantAppMinSizeMB: 5,
-                cursorDBCompactThresholdMB: 2
-            )
-
-            let scannedItems = await scanner.scan(config: testConfig) { _ in }
-            print("Scanned items count: \(scannedItems.count)")
-
-            assertCondition(scannedItems.contains { $0.category == .updaterLeftovers && $0.tier == .safe && $0.isSelected }, "Rule 1: Detects ShipIt updater leftover as safe & selected by default")
-            assertCondition(scannedItems.contains { $0.category == .redundantFrameworks && $0.path.hasSuffix("130.0.1") && $0.tier == .safe }, "Rule 2: Detects unreferenced old framework version 130.0.1")
-            assertCondition(!scannedItems.contains { $0.path.hasSuffix("131.0.2") }, "Rule 2: Never flags active Current framework version 131.0.2")
-            assertCondition(scannedItems.contains { $0.category == .browserAndAppCache && $0.tier == .safe }, "Rule 3: Detects Chrome Service Worker CacheStorage")
-            assertCondition(scannedItems.contains { $0.category == .logsAndDevCache && $0.tier == .safe }, "Rule 4: Detects ~/Library/Logs bloat")
-            assertCondition(scannedItems.contains { $0.category == .databaseCompact && $0.tier == .deep && !$0.isSelected }, "Rule 5: Detects bloated Cursor state.vscdb as deep tier (unchecked by default)")
-            assertCondition(scannedItems.contains { $0.category == .dormantApps && $0.tier == .deep && !$0.isSelected }, "Rule 6: Detects DormantSuite.app (>180 days) as deep tier (unchecked by default)")
-
-            // --- Run CleanerEngine on All Scanned Items (Permanent Delete Mode for deterministic verification) ---
-            let cleaner = CleanerEngine()
-            let results = await cleaner.clean(items: scannedItems, mode: .permanentDelete) { _, _, _, _ in }
-            assertCondition(results.allSatisfy(\.success), "CleanerEngine succeeds on all 6 rule items")
-
-            // Verify Rule 2 preservation of Current framework version
-            assertCondition(!fm.fileExists(atPath: versionsDir.appendingPathComponent("130.0.1").path), "Rule 2 Cleanup: Old framework version 130.0.1 removed")
-            assertCondition(fm.fileExists(atPath: currentVerFile.path), "Rule 2 Cleanup: Active framework version 131.0.2 preserved intact")
-
-            // Verify Rule 5 lossless SQLite rebuild of Cursor state.vscdb
-            let itemRowsAfter = runSQLite(dbPath: cursorDBPath, sql: "SELECT COUNT(*) FROM ItemTable;").trimmingCharacters(in: .whitespacesAndNewlines)
-            let kvRowsAfter = runSQLite(dbPath: cursorDBPath, sql: "SELECT COUNT(*) FROM cursorDiskKV;").trimmingCharacters(in: .whitespacesAndNewlines)
-            let tokenAfter = runSQLite(dbPath: cursorDBPath, sql: "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken';").trimmingCharacters(in: .whitespacesAndNewlines)
-            assertCondition(itemRowsAfter == "3", "Rule 5 Cleanup: Preserves all 3 rows in ItemTable (actual: \(itemRowsAfter))")
-            assertCondition(kvRowsAfter == "0", "Rule 5 Cleanup: Clears bloated cursorDiskKV rows (actual: \(kvRowsAfter))")
-            assertCondition(tokenAfter == "secret_jwt_token_123", "Rule 5 Cleanup: Preserves exact auth token value in ItemTable")
-
-            // Verify Rule 6 container metadata preservation
-            assertCondition(!fm.fileExists(atPath: dormantAppDir.path), "Rule 6 Cleanup: Removes dormant app bundle")
-            assertCondition(!fm.fileExists(atPath: containerCache.path), "Rule 6 Cleanup: Removes container Data payload")
-            assertCondition(fm.fileExists(atPath: protectedPlist.path), "Rule 6 Cleanup: Preserves protected .com.apple.containermanagerd.metadata.plist")
-
-            // --- Verify AppStore Mode Switching, Config Persistence & Cache ---
-            await MainActor.run {
-                let store = AppStore(environment: env, storageDirectoryURL: fakeStorage)
-                assertCondition(store.updateState == .idle, "AppStore: Initial updateState is .idle (never claims 'upToDate' before checking)")
-                store.setDemoMode(true)
-                assertCondition(store.isDemoMode && store.items.count == 13, "AppStore: Demo mode loads 13 realistic case items totaling ~79.3 GB")
-                store.setDemoMode(false)
-                assertCondition(!store.isDemoMode && store.items.isEmpty, "AppStore: Switching back to real mode isolates demo dataset from real state")
-
-                store.config.minCacheSizeMB = 25
-                let reloadedStore = AppStore(environment: env, storageDirectoryURL: fakeStorage)
-                assertCondition(reloadedStore.config.minCacheSizeMB == 25, "AppStore: Persists and reloads user ScannerConfig across restarts")
+            let canceled = await worker.value
+            check(canceled.canceled && canceled.results.count == 1 && fm.fileExists(atPath: cancelB), "Cancellation stops before the next real file operation")
+            let preCanceled = Task.detached {
+                withUnsafeCurrentTask { $0?.cancel() }
+                return await cleaner.clean(items: [cancelTargets[1]], mode: .permanentDelete) { _, _, _ in }
             }
+            check(await preCanceled.value.results.isEmpty, "Pre-canceled worker performs no cleanup")
 
-            // --- Verify SemVer 2.0.0 Rules ---
-            if let v1_9 = SemVer(string: "1.9.0"),
-               let v1_10 = SemVer(string: "1.10.0"),
-               let v1_0 = SemVer(string: "1.0.0"),
-               let v1_0_beta = SemVer(string: "1.0.0-beta.1"),
-               let v1_0_buildA = SemVer(string: "1.0.0+20261101"),
-               let v1_0_buildB = SemVer(string: "1.0.0+20261103") {
-                assertCondition(v1_10 > v1_9, "SemVer: 1.10.0 > 1.9.0 (numerical comparison)")
-                assertCondition(v1_0 > v1_0_beta, "SemVer: 1.0.0 > 1.0.0-beta.1 (stable > prerelease)")
-                assertCondition(v1_0_buildA == v1_0_buildB && !(v1_0_buildA < v1_0_buildB), "SemVer: +build metadata does not alter version precedence")
-            } else {
-                failed += 1
-                print("  [FAIL] SemVer parsing failed")
+            // A new package reference protects an old browser even after the scan.
+            guard let pwItem = found(pwRoot + "/chromium-1199") else { throw SafetyError.refused("Missing Playwright fixture") }
+            try Data("{\"browsers\":[{\"name\":\"chromium\",\"revision\":\"1199\"}]}".utf8).write(to: URL(fileURLWithPath: package + "/browsers.json"))
+            let pwResult = await cleaner.cleanItem(pwItem, mode: .permanentDelete)
+            check(!pwResult.success && fm.fileExists(atPath: pwRoot + "/chromium-1199/chrome"), "Playwright references rechecked immediately before deletion")
+            try Data("/missing/package".utf8).write(to: URL(fileURLWithPath: pwRoot + "/.links/broken"))
+            do { _ = try ScannerEngine.unreferencedPlaywrightDirectories(at: pwRoot); check(false, "Broken reference must retain all browsers") }
+            catch { check(true, "Incomplete Playwright references retain all browser versions") }
+
+            let blockedJournalURL = root.appendingPathComponent("blocked-journal")
+            let blockedJournal = try RecoveryStore(directory: blockedJournalURL)
+            try fm.removeItem(at: blockedJournalURL)
+            try Data("not a directory".utf8).write(to: blockedJournalURL)
+            let guardedCleaner = CleanerEngine(environment: env, recovery: blockedJournal, activity: inactive, testTrashDirectory: trash)
+            let guardedResult = await guardedCleaner.cleanItem(try item(cancelB), mode: .moveToTrash)
+            check(!guardedResult.success && fm.fileExists(atPath: cancelB), "Journal write failure leaves original untouched")
+
+            let state = root.appendingPathComponent("State")
+            try dir(state.path)
+            try Data("{\"minCacheSizeMB\":17,\"dormantAppDaysThreshold\":180,\"updateManifestURL\":\"https://unused.example\"}".utf8).write(to: state.appendingPathComponent("config.json"))
+            let store = AppStore(environment: env, storageDirectoryURL: state, activity: inactive, testTrashDirectory: trash)
+            check(store.config.minCacheSizeMB == 17 && store.config.minimumAgeDays == 14, "Old configuration migrates without enabling removed features")
+            store.items = [try item(cancelB)]
+            store.config.minimumAgeDays = 21
+            check(store.items.isEmpty, "Changing scan settings invalidates stale cleanup candidates")
+            let reloaded = AppStore(environment: env, storageDirectoryURL: state, activity: inactive, testTrashDirectory: trash)
+            check(reloaded.config.minimumAgeDays == 21, "Settings persist across app sessions")
+            store.startScan(); store.stop()
+            check(store.isScanning && store.isStopping, "Stop keeps UI busy until actual worker exits")
+            let deadline = Date().addingTimeInterval(10)
+            while store.isBusy && Date() < deadline { await Task.yield() }
+            check(!store.isBusy && !store.isStopping && store.phase.contains("停止"), "Worker acknowledgement finalizes canceled scan")
+            check(ScannerConfig(minCacheSizeMB: -1, minimumAgeDays: Int.max).minCacheSizeMB == 1 && ScannerConfig(minimumAgeDays: Int.max).minimumAgeDays == 3650, "Configuration clamps invalid and overflowing thresholds")
+
+            check(SemVer(string: "1.10.0")! > SemVer(string: "1.9.0")!, "Numeric release ordering")
+            check(SemVer(string: "1.0.0")! > SemVer(string: "1.0.0-beta.1")!, "Stable release outranks prerelease")
+            check(SemVer(string: "1.0.0+a") == SemVer(string: "1.0.0+b"), "Build metadata does not change precedence")
+            check(["1.0", "01.0.0", "1.0.0-01", "1.0.0+", "1.0.0-a_1"].allSatisfy { SemVer(string: $0) == nil }, "Malformed release identifiers rejected")
+            check(SemVer(string: "1.0.0-99999999999999999999999999999")! > SemVer(string: "1.0.0-9")!, "Long numeric prerelease identifiers compare numerically")
+            let payload = root.appendingPathComponent("mock.dmg")
+            let data = Data("mock install package".utf8); try data.write(to: payload)
+            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            func manifest(hash: String = digest, size: Int64 = Int64(data.count), minOS: String = "13.0", arch: [String] = ["arm64", "x86_64"], channel: String = "stable", version: String = "1.2.0") -> ReleaseManifest {
+                ReleaseManifest(version: version, buildNumber: 120, channel: channel, publishedAt: "2026-11-03", minSystemVersion: minOS,
+                                supportedArchitectures: arch, dmgUrl: payload.absoluteString, sha256: hash, sizeBytes: size, releaseNotes: "fixture")
             }
-
-            // --- Verify Update Compatibility & Channel Filtering ---
-            let betaManifest = ReleaseManifest(
-                version: "1.2.0-beta.1",
-                buildNumber: 120,
-                channel: "beta",
-                publishedAt: "2026-11-03T00:00:00Z",
-                dmgUrl: "https://example.com/MacSlim.dmg",
-                sha256: "abc",
-                sizeBytes: 1024,
-                releaseNotes: "Beta test"
-            )
-            let betaEval = UpdateEvaluator.evaluate(manifest: betaManifest, currentVersion: "1.0.0", preferredChannel: "stable")
-            assertCondition(betaEval == .channelFilteredOut(manifestChannel: "beta"), "OTA Evaluator: Stable channel user ignores beta updates")
-
-            let badArchManifest = ReleaseManifest(
-                version: "1.2.0",
-                buildNumber: 120,
-                channel: "stable",
-                publishedAt: "2026-11-03T00:00:00Z",
-                supportedArchitectures: ["ppc64"],
-                dmgUrl: "https://example.com/MacSlim.dmg",
-                sha256: "abc",
-                sizeBytes: 1024,
-                releaseNotes: "Arch mismatch test"
-            )
-            if case .incompatibleSystem = UpdateEvaluator.evaluate(manifest: badArchManifest, currentVersion: "1.0.0", preferredChannel: "stable") {
-                passed += 1
-                print("  [PASS] OTA Evaluator: Rejects incompatible CPU architecture")
-            } else {
-                failed += 1
-                print("  [FAIL] OTA Evaluator: Failed to reject incompatible architecture")
+            let service = UpdateService(allowLocalFiles: true)
+            let valid = await service.downloadAndVerifyDMG(manifest: manifest(), destinationDirectory: root) { _ in }
+            if case .readyToInstall(let path, _) = valid { check(fm.fileExists(atPath: path), "Verified update enabled in private attempt directory") }
+            else { check(false, "Valid update accepted") }
+            let corrupted = await service.downloadAndVerifyDMG(manifest: manifest(hash: String(repeating: "0", count: 64)), destinationDirectory: root) { _ in }
+            if case .failed = corrupted { check(true, "Corrupted update rejected") } else { check(false, "Corrupted update rejected") }
+            let wrongSize = await service.downloadAndVerifyDMG(manifest: manifest(size: 999), destinationDirectory: root) { _ in }
+            if case .failed = wrongSize { check(true, "Wrong-size update rejected") } else { check(false, "Wrong-size update rejected") }
+            let productionService = UpdateService()
+            if case .failed = await productionService.downloadAndVerifyDMG(manifest: manifest(), destinationDirectory: root, onPhase: { _ in }) {
+                check(true, "Production updater refuses local-file source")
+            } else { check(false, "Production updater refuses local-file source") }
+            for m in [manifest(minOS: "invalid"), manifest(minOS: "99.0"), manifest(arch: [])] {
+                if case .incompatibleSystem = UpdateEvaluator.evaluate(manifest: m, currentOSVersion: "15.0.0", currentArch: "arm64") { check(true, "Incompatible or malformed platform rejected") }
+                else { check(false, "Incompatible or malformed platform rejected") }
             }
-
-            // --- Verify UpdateService SHA-256 Verification & Corrupted Package Rejection ---
-            let dummyDMGURL = tempRoot.appendingPathComponent("mock_release.dmg")
-            let dummyDMGData = Data("MacSlim-Mock-DMG-Binary-Payload".utf8)
-            try dummyDMGData.write(to: dummyDMGURL)
-            let validSHA256 = SHA256.hash(data: dummyDMGData).map { String(format: "%02x", $0) }.joined()
-
-            let validManifest = ReleaseManifest(
-                version: "1.1.0",
-                buildNumber: 110,
-                channel: "stable",
-                publishedAt: "2026-11-03T00:00:00Z",
-                dmgUrl: dummyDMGURL.absoluteString,
-                sha256: validSHA256,
-                sizeBytes: Int64(dummyDMGData.count),
-                releaseNotes: "v1.1.0 bugfixes"
-            )
-            let updateService = UpdateService()
-            let validDownloadState = await updateService.downloadAndVerifyDMG(
-                manifest: validManifest,
-                destinationDirectory: tempRoot
-            ) { _ in }
-            if case .readyToInstall(let installedPath, _) = validDownloadState {
-                assertCondition(fm.fileExists(atPath: installedPath), "OTA Service: Valid SHA-256 package verified and moved to readyToInstall")
-            } else {
-                failed += 1
-                print("  [FAIL] OTA Service: Valid SHA-256 package should succeed")
-            }
-
-            let tamperedManifest = ReleaseManifest(
-                version: "1.1.1",
-                buildNumber: 111,
-                channel: "stable",
-                publishedAt: "2026-11-03T00:00:00Z",
-                dmgUrl: dummyDMGURL.absoluteString,
-                sha256: "0000000000000000000000000000000000000000000000000000000000000000",
-                sizeBytes: Int64(dummyDMGData.count),
-                releaseNotes: "Tampered hash"
-            )
-            let tamperedState = await updateService.downloadAndVerifyDMG(
-                manifest: tamperedManifest,
-                destinationDirectory: tempRoot
-            ) { _ in }
-            let leftoverPart = tempRoot.appendingPathComponent("MacSlim-1.1.1.dmg.part")
-            if case .failed = tamperedState {
-                assertCondition(!fm.fileExists(atPath: leftoverPart.path), "OTA Service: Rejects mismatched SHA-256 and deletes temporary .part file")
-            } else {
-                failed += 1
-                print("  [FAIL] OTA Service: Mismatched SHA-256 must fail verification")
-            }
-
-        } catch {
-            failed += 1
-            print("  [FAIL] Unexpected test exception: \(error)")
-        }
-
-        print("=== Summary: \(passed) Passed, \(failed) Failed ===")
-        if failed > 0 {
-            exit(1)
-        }
-    }
-
-    private static func runSQLite(dbPath: String, sql: String) -> String {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        proc.arguments = [dbPath, sql]
-        let outPipe = Pipe()
-        proc.standardOutput = outPipe
-        proc.standardError = Pipe()
-        try? proc.run()
-        proc.waitUntilExit()
-        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8) ?? ""
+            if case .channelFilteredOut = UpdateEvaluator.evaluate(manifest: manifest(channel: "beta", version: "1.2.0-beta.1")) { check(true, "Stable channel excludes beta") }
+            else { check(false, "Stable channel excludes beta") }
+            let process = ProcessRunner.run("/usr/bin/seq", ["1", "30000"])
+            check(process.status == 0 && process.output.contains("30000"), "Large subprocess output drains without pipe deadlock")
+            check(fm.fileExists(atPath: privateDB) && fm.fileExists(atPath: privateChat) && fm.fileExists(atPath: pwGo), "All protected data remains after integration tests")
+        } catch { failed += 1; print("[FAIL] Unexpected error: \(error)") }
+        print("Summary: \(passed) passed, \(failed) failed")
+        exit(failed == 0 ? 0 : 1)
     }
 }

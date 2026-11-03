@@ -1,110 +1,149 @@
-# MacSlim (Mac 瘦身助手)
+# MacSlim
 
-[![CI & Release Verification](https://github.com/jayson-sheyue/mac-slim/actions/workflows/ci.yml/badge.svg)](https://github.com/jayson-sheyue/mac-slim/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/jayson-sheyue/mac-slim)](https://github.com/jayson-sheyue/mac-slim/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-macOS%2013.0%2B%20(Universal)-blue)](https://github.com/jayson-sheyue/mac-slim/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+原生 macOS 瘦身工具，帮你找出软件更新后留下的安装包、积累的缓存和历史日志，检查后再清理。面向 macOS 13 及以上，提供 Apple Silicon 和 Intel 通用构建；已验证的环境见[测试记录](docs/testing.md)。
 
-> **专治 Mac 软件「越用越大」的原生轻量级瘦身小工具**
-> 纯原生 SwiftUI 构建 · Universal 通用双架构 (`arm64` + `x86_64`) · 零后台常驻进程 · 安装包仅 ~2.0 MB
+[下载安装](#安装与使用) · [查看具体清理规则](#具体扫描规则)
 
----
+## 为什么软件越用越大？先把硬盘想成一套公寓
 
-## 1. 产品用途与解决痛点
+你的 Mac 硬盘，就像一套你常住的精装公寓。Chrome、微信、Cursor、WPS 等软件，是搬进家里的住客或帮你做事的管家。
 
-许多 macOS 日常软件（Chrome、Cursor、VS Code、飞书、腾讯会议、Claude、ChatGPT 等）刚安装时只有几百 MB，使用几个月后却膨胀到几 GB 甚至几十 GB。其核心根源在于：
-1. **自动更新“只下不删”**：Electron (`ShipIt`)、Sparkle、腾讯会议 (`UpdatePackages`)、飞书 (`LarkShell/update`) 在后台下载解压完整的新版 `.app` 或历史备份包后未及时销毁。
-2. **双版本/多版本内核并存**：Chrome 等应用在 `.app/Contents/Frameworks/*.framework/Versions/` 内同时保留旧版与新版完整内核（每个版本 700MB+）。
-3. **网页离线缓存与日志失控**：Chrome `Service Worker/CacheStorage` 离线缓存与代理/编辑器日志无限追加，动辄占用 10GB+。
-4. **AI 编辑器 SQLite 状态库膨胀**：Cursor 的 `state.vscdb` 在 `cursorDiskKV` 表中堆积海量历史 AI 对话气泡与代码快照，导致单文件膨胀至 10GB+，而真正的账号登录与配置表 (`ItemTable`) 仅不到 2MB。
+刚搬进来时，每个软件只带一个小行李箱。住久了，更新时拆开的包装箱、为了随手取用留下的材料、过去的维修记录，慢慢挤满了储物间。**占空间的东西不一定都是垃圾：有些可以收走，有些还在用，有些是你的重要家当。**
 
-**MacSlim** 将经过实战验证的 6 大安全清理规则封装为开箱即用的 `.dmg` 桌面小工具，帮助 Mac 用户安全、透明地找回数十 GB 存储空间。
+常见的占用，大致可以用下面六个生活场景理解。它们解释的是软件为什么会变大；MacSlim 的处理范围也一并写在旁边。
 
----
+### 1. 自动更新残留：拆完电视还没收走的快递纸箱
 
-## 2. 核心功能与安全边界
+管家趁你忙的时候，先把新电视和泡沫箱搬进来，准备替换旧电视。这样换新时，你不用一直站在旁边等。可如果更新中断、重试，或收尾没做好，包装箱和解压出来的副本就可能留在角落里。
 
-### 🟢 / 🟡 双级安全分类模式
-- **🟢 完全无感项（默认勾选）**
-  - 包含：**自动更新残留包**、**应用内旧版冗余内核**、**浏览器与应用缓存**、**日志与开发工具缓存**。
-  - **100% 零副作用**：不触碰任何软件的账号登录态（Cookie / Token）、聊天记录、浏览器书签或个人文档。
-  - **严守 macOS 代码签名安全边界**：对第三方应用仅清理 `Versions/` 下未被 `Current` 符号链接指向的旧版内核目录，**绝不篡改二进制可执行文件架构 (`lipo`)**，彻底杜绝破坏 Apple Code Signature 导致应用崩溃或丢失钥匙串登录态的问题。
-- **🟡 深度瘦身项（默认不勾选，需手动确认影响说明）**
-  - **Cursor 状态数据库无损重组 (`state.vscdb`)**：通过系统内置 `/usr/bin/sqlite3` 原子导出并 100% 保留 `ItemTable`（账号登录、UI 布局、插件状态），清空膨胀的 `cursorDiskKV` 历史对话气泡并重建紧凑数据库，重组前后自动校验 `ItemTable` 行数一致性。
-  - **长期休眠大型应用**：基于 Spotlight `kMDItemLastUsedDate` 与包修改时间，识别超过 180 天未打开且体积 > 300MB 的大型应用及其关联沙盒容器 (`~/Library/Containers/<bundle-id>/Data`)，清理时自动跳过受 macOS 系统保护的 `.com.apple.containermanagerd.metadata.plist`。
+软件里的 ShipIt、Sparkle 和其他更新器也会下载、解压和暂存安装包。**MacSlim 主要帮你找这类历史包装箱**：先看目录结构和修改时间，再核对相关应用与进程是否运行；近期文件和正在使用的项目会保留。目录里有个“update”，并不意味着可以马上扔。
 
-### 🛡️ 双重清理执行模式与全局任务中心
-- **移至废纸篓（推荐默认）**：所有被清理的目录、旧内核或数据库原件均移入 macOS 废纸篓 (`~/.Trash`)，如有需要可随时一键原路恢复。
-- **直接永久清理**：立即释放磁盘扇区，针对深度瘦身项配有二次安全确认弹窗。
-- **真实扫描 + 79.3 GB 典型案例演示预览**：顶部工具栏支持一键切换「真实本机扫描」与「79GB 案例预览」（演示模式带醒目提示横幅，所有操作仅做模拟演练，绝不修改真实磁盘）。
-- **全局任务中心（消息盒子）与安全更新**：内置跨视图结果缓存、所有权令牌防并发冲突、一键导出脱敏诊断摘要，以及基于 SemVer 2.0.0 和 SHA-256 完整性校验的应用内更新检查。
+### 2. 旧版内核：新椅子搬来了，旧椅子可能还坐着人
 
----
+有些软件升级时，会先在旁边放好一套新零件，等你重启软件后再切换过去。这样做是为了减少更新对手头工作的影响。旧零件有时会多留一段时间，也可能留下未被自动移除的旧版本。
 
-## 3. 普通用户安装与快速开始（无需安装任何开发工具）
+但“新椅子已经在旁边”不代表“旧椅子肯定没人用”。**MacSlim 会列出符合规则的旧版内核，供你查看位置，不自动删除。** 应用签名和运行方式各不相同，需要时请通过软件自己的更新或重新安装处理。
 
-### 3.1 系统与环境要求
-- **操作系统**：macOS 13.0 (Ventura) 及以上版本
-- **处理器架构**：原生支持 Apple Silicon (`M1 / M2 / M3 / M4` `arm64`) 与 Intel (`x86_64`)
-- **外部运行时依赖**：**无**（纯 macOS 原生二进制，无需安装 Python、Node.js 或任何第三方库）
-- **网络条件**：扫描与清理功能 **100% 离线可用**；仅点击「检查更新」时需连接 HTTPS 更新源
+### 3. 网页与应用缓存：料理台上方便取用的调料和半成品
 
-### 3.2 下载与安装步骤
-1. 前往 [**GitHub Releases 页面**](https://github.com/jayson-sheyue/mac-slim/releases/latest) 下载最新版的 **`MacSlim-1.0.0-Universal.dmg`**。
-2. 双击挂载 `.dmg` 镜像，将 **`MacSlim.app`** 拖入右侧的 **`Applications`（应用程序）** 文件夹。
-3. **首次启动说明（Ad-hoc 签名提示）**：
-   由于本开源项目采用本地 Ad-hoc 签名分发（未启用付费 Apple Developer ID 公证），首次打开时若系统提示“无法验证开发者”，请按以下任一方式打开：
-   - 在访达（Finder）中按住 `Control` 键点击 `MacSlim.app`，选择 **「打开」** 并在弹窗中确认；
-   - 或在终端执行以下命令移除下载隔离属性：
-     ```bash
-     xattr -cr /Applications/MacSlim.app
-     ```
-4. **可选权限配置**：如需扫描受 macOS 沙盒保护的部分第三方应用容器目录 (`~/Library/Containers`)，可在 **系统设置 → 隐私与安全性 → 完全磁盘访问权限 (Full Disk Access)** 中添加并开启 `MacSlim`。
+每次打开网页都重新“买菜”会很慢，所以软件把图片、脚本和离线资源留在本地，下次直接拿来用。好处是快、省流量，有些内容还能离线打开；代价是几个月前用过一次的“调料瓶”，也可能一直占着台面。
 
-### 3.3 升级与更新方式
-- 点击应用顶部工具栏的 **「检查更新」**（或使用快捷键 `⌘U`），应用将从配置的 HTTPS 更新清单 (`release-manifest.json`) 获取最新版本信息。
-- 发现新版后可点击 **「一键下载并校验更新包」**，应用会在本地强制验证 `.dmg` 的 `SHA-256` 哈希摘要通过后再打开挂载（若当前有正在执行的扫描或清理任务，将自动保护任务并允许稍后安装）。
+MacSlim 会列出这类缓存候选，**未知缓存默认不选**。清理后可能需要联网重新下载，也可能失去离线内容。账号、密码和书签更像家里的钥匙与通讯录，不能因为放在相近的抽屉里就一起收走；发现这些数据特征时，工具会保留并给出提示。
 
----
+### 4. AI 与办公软件的历史记录：装订起来的草稿和工作账本
 
-## 4. 开发者源码构建与分层测试
+对话、草稿、撤回记录、工作状态和代码快照，可能帮助你继续工作或找回旧内容。它们会占空间，但不能只看账本厚，就认定里面都是废纸。不同软件、不同版本的存储方式也可能变化。
 
-如果你希望从源码编译、修改扫描规则或运行自动化测试，仅需 macOS 自带的 Xcode Command Line Tools (`xcode-select --install`)。
+**这部分不属于 MacSlim 的清理范围。** 当前版本不重建 Cursor 的 `state.vscdb`，不删除 AI 对话或其他应用的历史数据库。需要整理时，优先使用对应软件提供的管理、备份或导出功能。
 
-### 4.1 快速检查与隔离测试套件
-```bash
-# 运行全部 Swift 源码静态类型检查 + 26 项沙盒隔离单元/集成测试
+### 5. 开发工具的下载与构建文件：施工留下的脚手架和工具棚
+
+安装依赖、编译程序、运行自动化测试，都可能先下载材料、搭好环境。留着它们，下次干活不用重来；项目不用了，这些材料又可能闲置很久。但工具放在“缓存目录”，也不代表它已经成了废铁——Playwright 下载的浏览器，就可能是测试正在用的工具。
+
+MacSlim 会列出 pip、Homebrew、node-gyp 等标准位置的历史缓存，默认由你检查后选择；Playwright 还会核对包引用，保留登记使用中的版本。**它不会因为项目很久没打开，就卸载项目环境或不常用的软件。** 离线工作前，也请保留仍需使用的下载材料。
+
+### 6. 诊断与崩溃日志：留下来帮助查故障的行车记录
+
+软件运行和出错时留下日志，是为了让开发者有线索查问题。刚发生故障时，这些记录很有用；长期堆积后，又可能占据不少空间。
+
+MacSlim 会识别历史日志文件，保留近期修改的内容。正在排查故障时，请先保留需要交给开发者的记录；**旧日志也不自动等于没用的日志**。
+
+## 开发商为什么不顺手收拾干净？
+
+不少应用本来就有缓存上限、日志轮转或更新后回收机制。只是这些机制不总能覆盖中断、异常退出、多个版本并存等情况，开发者还要权衡几件事：
+
+- **误删的代价更高。** 留下一个旧箱子会占地方，扔掉夹在箱子里的重要文件，却可能让用户丢失工作。
+- **速度和空间需要取舍。** 多留一点缓存可能让下次启动更快；清掉以后，又可能需要重新下载或编译。
+- **各自的一点点，会合成全屋的一大堆。** 单个软件看起来只留了少量材料，很多软件累积起来就明显了。
+- **“很久没碰过”不等于“不需要”。** 软件很难判断你是真的不用了，还是下周就要回来接着做。
+
+所以，不能简单地把所有占用都归因于开发商“不愿意打扫”，也不能用同一条删除规则处理所有软件。
+
+## MacSlim 怎么帮你整理？
+
+你可以把它看成一位先列清单、再动手的收纳助手：
+
+1. **先找包装箱和历史记录。** 重点识别历史更新包、缓存与日志，不要求你先记住每个软件把东西放在哪里。
+2. **把用途和影响说清楚。** 历史更新包与日志中的建议项默认勾选；未知缓存和开发缓存由你检查后选择；旧内核只提供查看入口。
+3. **默认先放进废纸篓。** 清理前再次核对文件是否变化、关联应用是否运行，并记录恢复位置。移至废纸篓不等于已经腾出空间，清空后才可能回收；永久删除需要另行确认。
+
+第一次使用，先退出相关应用，保留默认设置，查看建议项的影响说明，再处理少量项目。确认使用正常后，再决定是否清空废纸篓。**目标是让你知道在整理什么，而不是承诺每次都能拿回几十 GB，或保证任何清理都毫无影响。**
+
+## 安装与使用
+
+普通用户无需安装 Python、Node.js 或 Swift。下载 [Releases](https://github.com/jayson-sheyue/mac-slim/releases) 中对应版本的 Universal DMG，打开后把 MacSlim.app 拖入“应用程序”。本地构建的候选包位于 `dist/`；存在本地候选包不代表对应版本已在 GitHub 正式发布。
+
+当前使用 Ad-hoc 签名，尚未完成 Developer ID 签名与 Apple 公证。下载后首次启动可能被 Gatekeeper 阻止。确认来源后，按照 [Apple 官方说明](https://support.apple.com/en-gb/102445)在“系统设置 → 隐私与安全性”中查看“仍要打开”。不需要关闭系统安全保护。
+
+1. 点击“开始扫描”。扫描与清理不联网。
+2. 查看识别依据、影响和路径。建议项默认勾选，未知缓存需手动选择。
+3. 默认“移至废纸篓”；永久删除需要确认，不能撤销。
+4. 到“清理记录”查看结果或恢复。恢复不覆盖原位置的新文件；清空废纸篓或原父目录已消失时无法自动恢复。
+5. 扫描权限不足时会列出跳过提示，不能把“没有发现”理解为“已完整扫描”。需要读取受保护目录时，可在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中添加 MacSlim；无需以 root 运行。
+
+“已移至废纸篓”表示文件位置变化，不等于可用空间增加。体积按分配空间估算；APFS 克隆、快照、压缩与其他进程都会影响实际回收空间。
+
+“停止”会停止后续项目并等待当前文件操作结束。已经完成的移动或删除不会自动撤销。清理进行中不能重新扫描或开始另一轮文件操作。
+
+## 具体扫描规则
+
+识别规则依据目录结构、应用 Bundle ID 和文件时间，不限定于某几个应用品牌。默认保留最近 14 天修改过的内容；无法确认用途的缓存默认不选。
+
+<details>
+<summary>查看扫描目录、识别依据与默认行为</summary>
+
+| 类型 | 如何识别 | 默认行为 |
+| --- | --- | --- |
+| Electron 更新残留 | `~/Library/Caches/*.ShipIt/update.*`，适用于使用该更新结构的应用 | 建议清理过期目录；关联应用或目录中的更新进程运行时跳过 |
+| Sparkle 更新残留 | 缓存目录中的 `org.sparkle-project.Sparkle/Installation/*` | 建议清理过期安装包 |
+| 其他更新器 | 沙盒 `Data/Library/Global/UpdatePackages/*`、`LarkShell/update/*`、`GoogleUpdater/crx_cache/*` | 建议清理过期子项，不删除容器或用户数据目录 |
+| 应用缓存 | `~/Library/Caches/<应用>/*`，以及 Application Support 中明确的 Cache / Caches / Code Cache / GPUCache / CacheStorage 等目录 | 请先检查，默认不选；并非所有放在 Caches 的内容都可无代价重建 |
+| 浏览器离线资源 | 如 Chrome、其他 Chromium 应用的 `Service Worker/CacheStorage` | 请先检查；清理可能失去离线资源，需要联网重新获取 |
+| 历史日志 | `~/Library/Logs` 及应用支持目录中 `logs` / `log` 下的 `.log`、轮转日志、`.ips`、`.crash` 文件 | 建议清理过期文件，保留近期写入的日志 |
+| 开发工具下载缓存 | pip、Homebrew、node-gyp 标准缓存位置 | 请先检查；后续安装或编译可能重新下载 |
+| Playwright 历史浏览器 | 读取 `.links` 与每个包的 `browsers.json`，核对所有登记版本和平台覆盖版本 | 仅列出未被引用的过期版本，默认不选；引用缺失或损坏时全部保留。执行前再次核对 |
+| 应用旧版内核 | 应用目录中的 `.app/Contents/Frameworks/*.framework/Versions`，仅列出比有效 `Current` 更早的数字版本 | **仅供检查，不执行删除** |
+
+扫描会发现 `/Applications`、`~/Applications` 及其有限层级子目录中的应用，使用名称和 Bundle ID 关联运行状态。应用支持目录的结构搜索有深度限制，不会无限遍历整个用户目录。
+
+</details>
+
+## 数据与签名边界
+
+- 不修改已安装的应用包，不裁剪二进制架构，不重签第三方应用。旧内核是否可安全删除取决于应用打包、签名和运行方式，`Current` 未指向它不足以证明可删，请使用应用官方更新或重新安装处理。
+- 不再提供 Cursor 数据库重建、历史对话删除或休眠应用卸载。不会因为一个应用很久没打开就删除它及其容器。
+- 缓存候选若含 Cookie、Login Data、Bookmarks、密码/钥匙串、数据库等个人数据特征，会保留并给出提示。不会扫描普通 Documents、聊天存储、草稿等目录。但无法推断所有第三方应用自定义格式，未知缓存仍需人工检查。
+- 不清理 Playwright 正在使用或仍被登记包引用的浏览器；Playwright-Go 和无法验证引用的运行时保留。使用未登记的包或自定义浏览器路径时，不要清理依赖的版本。
+- 不对任何第三方应用或未来版本承诺“100% 零副作用”。应用升级可能改变目录用途，近期内容、符号链接重定向、跨卷路径和扫描后变化的项目会跳过。
+
+## 设置、更新与恢复数据
+
+设置和恢复记录保存在 `~/Library/Application Support/MacSlim/`。从 1.0 升级时保留可用的最小体积设置，移除的数据库、休眠应用与自定义更新源设置不再启用。旧历史文件保留但不导入为可恢复记录。
+
+设置中可调整最小体积和保留天数。点击“检查更新”后才联网，更新源固定为项目 GitHub Release 清单。下载包需通过体积与 SHA-256 校验，按独立临时目录保存并保留系统下载安全标记；不会自动替换正在运行的应用。SHA-256 是完整性校验，不等于发布者签名或 Apple 公证。
+
+恢复记录会在移动前写入，存储不可用时阻止移至废纸篓。意外退出后会核对待完成记录；若系统废纸篓不可读，需要在访达中手动处理。不要手工删除 `recovery-v1.json` 后再期望应用恢复先前项目。诊断摘要不包含文件路径、访问令牌或任务错误原文，不会自动上传。
+
+## 开发与验证
+
+开发构建需要 macOS 与支持 Swift 6 的 Xcode Command Line Tools。应用运行本身无需开发工具。
+
+```sh
 ./scripts/check.sh
-```
-
-### 4.2 构建 Universal `.app` 与 `.dmg` 发布包
-```bash
-# 执行测试门禁 -> 生成矢量图标 -> 编译 arm64+x86_64 通用二进制 -> 签名自检 -> 打包 DMG 与 SHA256 清单
 ./scripts/build_dmg.sh
+./scripts/verify_release.sh
 ```
-构建完成后，产物位于 `dist/` 目录：
-- `dist/MacSlim.app`：通用双架构原生应用包
-- `dist/MacSlim-1.0.0-Universal.dmg`：可分发的 DMG 安装镜像
-- `dist/SHA256SUMS.txt` & `dist/release-manifest.json`：SHA-256 校验文件与 OTA 更新清单
 
-完整支持矩阵、回归测试用例说明与发布准入标准请参见 [**docs/testing.md**](./docs/testing.md)，版本历史请参见 [**CHANGELOG.md**](./CHANGELOG.md)。
+- 检查包含 macOS 13 最低部署目标的静态检查和临时目录中的真实文件操作回归；不退出真实应用、不使用真实废纸篓、不访问私人数据库。
+- 构建生成 arm64 与 x86_64 通用应用、DMG、SHA256SUMS.txt 和 release-manifest.json，并核对版本、签名与校验值。
+- CI 配置 macOS 15（arm64、Intel）与 macOS 26 检查。配置存在不等于此次已在远程执行。
+- `--self-check` 只核对启动和版本身份，不替代完整界面、安装或清理测试。程序没有面向用户的命令行清理接口；不支持 Windows、Linux 或无桌面的远程清理。
 
----
+具体用例、支持矩阵和尚需验证的环境见 [docs/testing.md](docs/testing.md)。
 
-## 5. 注意事项与已知限制
+## 技术依据
 
-1. **正在运行的应用占用**：清理 Chrome 旧版内核框架后，建议重启一次 Chrome 以释放旧内核句柄；执行 Cursor `state.vscdb` 无损重组时，工具会自动通知 Cursor 安全退出后再执行原子替换。
-2. **微信 / 飞书本地聊天记录保护**：为绝对保护用户隐私与数据安全，MacSlim **永远不会**扫描或删除微信 (`xwechat_files`)、飞书本地聊天数据库或剪映本地剪辑草稿 (`JianyingPro Drafts`)。
-3. **签名与公证范围**：当前版本使用 Ad-hoc 代码签名 (`codesign --sign -`) 并通过 SHA-256 清单校验完整性，尚未包含 Apple Developer ID Notarization 公证票据。
-
----
-
-## 6. 官方技术参考依据
-
-本项目在系统 API 调用、数据库重组与版本发布规范上严格遵循以下官方文档：
-- **Apple FileManager & Trash API**：[NSFileManager.trashItem(at:resultingItemURL:)](https://developer.apple.com/documentation/foundation/filemanager/1407692-trashitem) — 原生废纸篓安全移动与恢复机制。
-- **Apple Spotlight Metadata (`kMDItemLastUsedDate`)**：[MDItem Reference](https://developer.apple.com/documentation/coreservices/mditem-r5u) — 准确读取应用真实最后打开时间。
-- **Apple CryptoKit SHA-256**：[SHA256 Structure Reference](https://developer.apple.com/documentation/cryptokit/sha256) — 更新包加密哈希完整性校验。
-- **SQLite 3 Atomic Rebuild & VACUUM**：[SQLite Official Documentation](https://www.sqlite.org/lang_vacuum.html) — 状态数据库无损导出与紧凑重建。
-- **Semantic Versioning 2.0.0**：[SemVer 2.0.0 Specification](https://semver.org/) — 版本优先级比较规范。
-- **GitHub Releases Management**：[Managing Releases in a Repository](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository) — 发布资产与版本标签管理。
+- [Apple FileManager.trashItem](https://developer.apple.com/documentation/foundation/filemanager/trashitem(at:resultingitemurl:))：使用系统废纸篓并记录返回位置。
+- [Apple 代码签名边界](https://developer.apple.com/library/archive/technotes/tn2206/)：不将“非 Current 版本”等同于任意可删资源。
+- [Playwright 浏览器安装和缓存](https://playwright.dev/docs/browsers)、[官方注册表实现](https://github.com/microsoft/playwright/blob/main/packages/playwright-core/src/server/registry/index.ts)：核对浏览器引用，保留未知结构。
+- [Swift Task](https://developer.apple.com/documentation/swift/task)：取消实际工作任务，等待完成后再解除操作锁定。
