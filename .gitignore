@@ -1,0 +1,10 @@
+# Build & Release Artifacts (uploaded via GitHub Releases / Actions Artifacts)
+build/
+dist/
+*.dmg
+*.part
+.DS_Store
+.swiftpm/
+.build/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/

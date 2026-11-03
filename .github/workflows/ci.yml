@@ -1,0 +1,53 @@
+name: CI & Release Verification
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  fast-check:
+    name: Fast Static & Isolated Integration Check
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run fast check suite (Typecheck + 26 Isolated Assertions)
+        run: |
+          chmod +x ./scripts/check.sh
+          ./scripts/check.sh
+
+  build-and-verify-dmg:
+    name: Build Universal DMG & Verify Release Identity
+    needs: fast-check
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Universal App Bundle, DMG & Release Manifest
+        run: |
+          chmod +x ./scripts/build_dmg.sh ./scripts/generate_release_metadata.sh
+          ./scripts/build_dmg.sh
+
+      - name: Verify Universal Architectures & Signature
+        run: |
+          /usr/bin/file dist/MacSlim.app/Contents/MacOS/MacSlim | grep "x86_64"
+          /usr/bin/file dist/MacSlim.app/Contents/MacOS/MacSlim | grep "arm64"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 dist/MacSlim.app
+          /usr/bin/shasum -a 256 -c dist/SHA256SUMS.txt
+        working-directory: ${{ github.workspace }}
+
+      - name: Upload DMG & Release Manifest Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MacSlim-Universal-Release-Candidate
+          path: |
+            dist/*.dmg
+            dist/SHA256SUMS.txt
+            dist/release-manifest.json
+          if-no-files-found: error
