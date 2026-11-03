@@ -2,7 +2,7 @@
 
 原生 macOS 瘦身工具，帮你找出软件更新后留下的安装包、积累的缓存和历史日志，检查后再清理。面向 macOS 13 及以上，提供 Apple Silicon 和 Intel 通用构建；已验证的环境见[测试记录](docs/testing.md)。
 
-> 本文对应 **1.1.1-beta.1 预发布版本**。安装包以 [GitHub Releases](https://github.com/jayson-sheyue/mac-slim/releases) 实际列出的资产为准；旧版本的功能与安全边界不同。
+> 本文对应 **1.1.1-beta.2 预发布版本**。安装包以 [GitHub Releases](https://github.com/jayson-sheyue/mac-slim/releases) 实际列出的资产为准；旧版本的功能与安全边界不同。
 
 [安装与构建说明](#安装与使用) · [查看具体清理规则](#具体扫描规则)
 

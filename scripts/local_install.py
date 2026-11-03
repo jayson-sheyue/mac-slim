@@ -244,9 +244,10 @@ def install(args):
             for key in ['minCacheSizeMB', 'minimumAgeDays']:
                 if key in before_data.get('config.json', {}) and before_data['config.json'][key] != after_data.get('config.json', {}).get(key):
                     raise RuntimeError('User scan settings changed during installation')
-            remaining = [row for row in inventory([REPO]) if not row['path'].startswith(str(image.resolve()) + '/')]
+            remaining = [row for row in inventory([REPO])
+                         if row['path'] != str(old.resolve()) and not row['path'].startswith(str(image.resolve()) + '/')]
             if len(remaining) != 1 or remaining[0]['path'] != str(CANONICAL):
-                raise RuntimeError('Duplicate application bundles remain after installation')
+                raise RuntimeError('Duplicate application bundles remain after installation: ' + json.dumps(remaining))
             receipt['bundleSHA256'] = tree_sha(CANONICAL)
             receipt['verifiedAt'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
             Path(args.receipt).write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + '\n')

@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
 VERSION="$(tr -d '[:space:]' < "${PROJECT_DIR}/VERSION")"
-BUILD_NUMBER="111"
+BUILD_NUMBER="112"
 SOURCE_COMMIT="$(git -C "${PROJECT_DIR}" rev-parse HEAD)"
 CHANNEL="stable"
 if [[ "${VERSION}" == *-* ]]; then CHANNEL="beta"; fi

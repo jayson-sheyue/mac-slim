@@ -19,7 +19,7 @@ class InstallTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='macslim-install-test-')
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
 
     def app(self, root, content=b'original', bundle_id='com.macslim.cleaner'):
         (root / 'Contents/MacOS').mkdir(parents=True)
@@ -75,7 +75,7 @@ class InstallTests(unittest.TestCase):
         app = self.app(self.root / 'Other.app', bundle_id='com.example.other')
         with patch.object(installer, 'run') as command:
             with self.assertRaises(RuntimeError):
-                installer.validate_bundle(app, {'version': '1.1.1-beta.1', 'buildNumber': 111, 'sourceCommit': 'a'*40})
+                installer.validate_bundle(app, {'version': '1.1.1-beta.2', 'buildNumber': 111, 'sourceCommit': 'a'*40})
             command.assert_not_called()
 
     def test_launch_failure_restores_previous_installed_bundle(self):
@@ -87,7 +87,7 @@ class InstallTests(unittest.TestCase):
         home = self.root / 'Home'; home.mkdir()
         dmg = self.root / 'release.dmg'; dmg.write_bytes(b'fixture')
         manifest = self.root / 'release-manifest.json'
-        manifest.write_text(json.dumps({'sha256': installer.sha(dmg), 'sizeBytes': 7, 'sourceCommit': 'a'*40, 'version': '1.1.1-beta.1', 'buildNumber': 111}))
+        manifest.write_text(json.dumps({'sha256': installer.sha(dmg), 'sizeBytes': 7, 'sourceCommit': 'a'*40, 'version': '1.1.1-beta.2', 'buildNumber': 111}))
         real_run = installer.run
 
         def command(*args, **kwargs):
@@ -117,6 +117,47 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(Path(args.receipt).exists())
         self.assertTrue(list(home.rglob('*.zip')))
 
+
+    def test_success_ignores_only_its_own_temporary_rollback_bundle(self):
+        applications = self.root / 'Applications'; applications.mkdir()
+        canonical = self.app(applications / 'MacSlim.app')
+        image = self.root / 'image'; image.mkdir()
+        source = self.app(image / 'MacSlim.app', content=b'new release')
+        expected = installer.tree(source)
+        home = self.root / 'Home'; home.mkdir()
+        dmg = self.root / 'release.dmg'; dmg.write_bytes(b'fixture')
+        manifest = self.root / 'release-manifest.json'
+        metadata = {'sha256': installer.sha(dmg), 'sizeBytes': 7, 'sourceCommit': 'a'*40, 'version': '1.1.1-beta.2', 'buildNumber': 112}
+        manifest.write_text(json.dumps(metadata))
+        real_run = installer.run
+
+        def command(*args, **kwargs):
+            if str(args[0]) == '/fixture/helper':
+                return '[]' if args[1] == 'inventory' else ''
+            if str(args[0]) in {installer.REGISTRY, str(canonical / 'Contents/MacOS/MacSlim')}:
+                return ''
+            return real_run(*args, **kwargs)
+
+        def inventory(_):
+            paths = [canonical, *applications.glob('.MacSlim-install-*/old.app')]
+            return [{'path': str(path), 'id': 'com.macslim.cleaner'} for path in paths]
+
+        @contextlib.contextmanager
+        def mounted(_):
+            yield image
+
+        import argparse
+        args = argparse.Namespace(dmg=dmg, manifest=manifest, helper='/fixture/helper', receipt=self.root/'receipt.json')
+        with patch.object(installer, 'REVIEW_BUILDS', self.root / 'unused'), patch.object(installer, 'CANONICAL', canonical), \
+             patch.object(installer, 'inventory', inventory), patch.object(installer, 'mounted', mounted), \
+             patch.object(installer, 'validate_bundle'), patch.object(installer, 'unregister'), \
+             patch.object(installer, 'wait_identity', return_value={'pid': '123'}), patch.object(installer, 'run', command), \
+             patch.object(Path, 'home', return_value=home), patch('builtins.print'):
+            installer.install(args)
+        self.assertEqual(expected, installer.tree(canonical))
+        self.assertTrue(Path(args.receipt).exists())
+        self.assertEqual(list(applications.glob('.MacSlim-install-*')), [])
+        self.assertTrue(list(home.rglob('*.zip')))
 
 if __name__ == '__main__':
     unittest.main()
