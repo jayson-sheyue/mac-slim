@@ -13,6 +13,7 @@ mkdir -p "${MODULE_CACHE}"
 echo "==> [Check 1/2] Static typecheck across all Swift sources..."
 /usr/bin/swiftc -swift-version 6 -warnings-as-errors -module-cache-path "${MODULE_CACHE}" -typecheck \
     "${PROJECT_DIR}/Sources/Models.swift" \
+    "${PROJECT_DIR}/Sources/RuntimeIdentity.swift" \
     "${PROJECT_DIR}/Sources/FileSafety.swift" \
     "${PROJECT_DIR}/Sources/UpdateManager.swift" \
     "${PROJECT_DIR}/Sources/ScannerEngine.swift" \
@@ -24,6 +25,7 @@ echo "==> [Check 1/2] Static typecheck across all Swift sources..."
 echo "==> [Check 2/2] Running isolated unit & integration test suite..."
 /usr/bin/swiftc -swift-version 6 -warnings-as-errors -module-cache-path "${MODULE_CACHE}" \
     "${PROJECT_DIR}/Sources/Models.swift" \
+    "${PROJECT_DIR}/Sources/RuntimeIdentity.swift" \
     "${PROJECT_DIR}/Sources/FileSafety.swift" \
     "${PROJECT_DIR}/Sources/UpdateManager.swift" \
     "${PROJECT_DIR}/Sources/ScannerEngine.swift" \
@@ -34,4 +36,7 @@ echo "==> [Check 2/2] Running isolated unit & integration test suite..."
 
 "${TEST_BIN}"
 rm -f "${TEST_BIN}"
+echo "==> Installer rollback and artifact-identity regressions..."
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s "${PROJECT_DIR}/Tests" -p 'test_*.py'
+/usr/bin/swiftc -swift-version 6 -warnings-as-errors -module-cache-path "${MODULE_CACHE}" -target "$(uname -m)-apple-macosx13.0" -parse-as-library -typecheck "${PROJECT_DIR}/scripts/app_lifecycle.swift"
 echo "==> All fast checks passed!"

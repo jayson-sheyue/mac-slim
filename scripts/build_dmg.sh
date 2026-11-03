@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
 VERSION="$(tr -d '[:space:]' < "${PROJECT_DIR}/VERSION")"
-BUILD_NUMBER="110"
+BUILD_NUMBER="111"
+SOURCE_COMMIT="$(git -C "${PROJECT_DIR}" rev-parse HEAD)"
 BUILD_DIR="${PROJECT_DIR}/build"
 DIST_DIR="${PROJECT_DIR}/dist"
 APP_NAME="MacSlim"
@@ -18,6 +19,19 @@ REPO_SLUG="${GITHUB_REPOSITORY:-jayson-sheyue/mac-slim}"
 echo "==> [1/6] Running fast checks & automated test suite (v${VERSION})..."
 "${PROJECT_DIR}/scripts/check.sh"
 
+# Keep previous runnable build copies recoverable without leaving another .app.
+if [[ -d "${APP_BUNDLE}" ]]; then
+    PROJECT_ROOT="${PROJECT_DIR}" PYTHONDONTWRITEBYTECODE=1 python3 - <<'ARCHIVE'
+import os, sys
+from pathlib import Path
+root = Path(os.environ['PROJECT_ROOT'])
+sys.path.insert(0, str(root / 'scripts'))
+from local_install import archive_app
+backup = root / '.build/prior-artifacts'
+backup.mkdir(parents=True, exist_ok=True)
+print(archive_app(root / 'dist/MacSlim.app', backup))
+ARCHIVE
+fi
 rm -rf "${BUILD_DIR}" "${DIST_DIR}"
 mkdir -p "${BUILD_DIR}" "${DIST_DIR}" "${MODULE_CACHE}"
 
@@ -34,6 +48,7 @@ cp "${BUILD_DIR}/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 
 echo "==> [3/6] Compiling Universal (arm64 + x86_64) native binary..."
 SOURCES=(
+    "${PROJECT_DIR}/Sources/RuntimeIdentity.swift"
     "${PROJECT_DIR}/Sources/FileSafety.swift"
     "${PROJECT_DIR}/Sources/Models.swift"
     "${PROJECT_DIR}/Sources/UpdateManager.swift"
@@ -66,6 +81,8 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" << EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>MacSlimSourceCommit</key>
+    <string>${SOURCE_COMMIT}</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
     <key>CFBundleDisplayName</key>

@@ -5,6 +5,13 @@ import CryptoKit
 struct MacSlimTests {
     @MainActor
     static func main() async {
+        if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--instance-probe" {
+            do {
+                guard let lease = try InstanceLease.acquire(at: URL(fileURLWithPath: CommandLine.arguments[2])) else { exit(75) }
+                try lease.record(["pid": String(ProcessInfo.processInfo.processIdentifier)])
+                withExtendedLifetime(lease) { exit(0) }
+            } catch { exit(76) }
+        }
         var passed = 0
         var failed = 0
         func check(_ value: Bool, _ message: String) {
@@ -43,6 +50,19 @@ struct MacSlimTests {
         }
         do {
             try dir(home); try dir(applications); try dir(trash)
+            let leaseURL = root.appendingPathComponent("runtime.lock")
+            var lease = try InstanceLease.acquire(at: leaseURL)
+            check(lease != nil, "First process owns the runtime lock")
+            try lease?.record(["pid": "fixture", "path": "/Applications/MacSlim.app"])
+            let probePath = FileSafety.canonicalPath(CommandLine.arguments[0])
+            check(ProcessRunner.run(probePath, ["--instance-probe", leaseURL.path]).status == 75, "Independent second process cannot own the runtime lock")
+            lease = nil
+            check(ProcessRunner.run(probePath, ["--instance-probe", leaseURL.path]).status == 0, "Runtime lock releases after owner exits")
+            let redirectedLock = root.appendingPathComponent("redirected.lock")
+            try fm.createSymbolicLink(atPath: redirectedLock.path, withDestinationPath: leaseURL.path)
+            do { _ = try InstanceLease.acquire(at: redirectedLock); check(false, "Symlink lock must be rejected") }
+            catch { check(true, "Runtime lock rejects symlink redirection") }
+            check(RuntimeIdentity.isCanonical("/Applications/MacSlim.app") && !RuntimeIdentity.isCanonical("/private/tmp/MacSlim.app"), "Only the canonical installed application is a normal runtime entry")
             for path in env.writableRoots { try dir(path) }
             let shipit = home + "/Library/Caches/io.example.NovelEditor.ShipIt/update.old"
             try file(shipit + "/NovelEditor.app/Contents/MacOS/NovelEditor")

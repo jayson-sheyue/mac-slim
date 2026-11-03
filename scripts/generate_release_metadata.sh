@@ -4,7 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
 VERSION="$(tr -d '[:space:]' < "${PROJECT_DIR}/VERSION")"
-BUILD_NUMBER="110"
+BUILD_NUMBER="111"
+SOURCE_COMMIT="$(git -C "${PROJECT_DIR}" rev-parse HEAD)"
+CHANNEL="stable"
+if [[ "${VERSION}" == *-* ]]; then CHANNEL="beta"; fi
 DIST_DIR="${PROJECT_DIR}/dist"
 DMG_NAME="MacSlim-${VERSION}-Universal.dmg"
 DMG_PATH="${DIST_DIR}/${DMG_NAME}"
@@ -25,7 +28,8 @@ cat > "${DIST_DIR}/release-manifest.json" << EOF
 {
   "version": "${VERSION}",
   "buildNumber": ${BUILD_NUMBER},
-  "channel": "stable",
+  "channel": "${CHANNEL}",
+  "sourceCommit": "${SOURCE_COMMIT}",
   "publishedAt": "${PUB_DATE}",
   "minSystemVersion": "13.0",
   "supportedArchitectures": [
@@ -35,7 +39,7 @@ cat > "${DIST_DIR}/release-manifest.json" << EOF
   "dmgUrl": "https://github.com/${REPO_SLUG}/releases/download/v${VERSION}/${DMG_NAME}",
   "sha256": "${SHA256_HASH}",
   "sizeBytes": ${SIZE_BYTES},
-  "releaseNotes": "MacSlim v${VERSION}：按目录结构识别更新残留、应用缓存和历史日志；增加执行前复核、可靠取消、废纸篓恢复和 Playwright 引用保护。旧版内核仅供检查，不修改应用包。移除数据库重建与休眠应用卸载。"
+  "releaseNotes": "MacSlim v${VERSION}：按目录结构识别更新残留、应用缓存和历史日志；增加执行前复核、可靠取消、废纸篓恢复和 Playwright 引用保护。旧版内核仅供检查，不修改应用包。移除数据库重建与休眠应用卸载；统一发布产物、本机安装与单实例启动。"
 }
 EOF
 

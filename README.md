@@ -2,7 +2,7 @@
 
 原生 macOS 瘦身工具，帮你找出软件更新后留下的安装包、积累的缓存和历史日志，检查后再清理。面向 macOS 13 及以上，提供 Apple Silicon 和 Intel 通用构建；已验证的环境见[测试记录](docs/testing.md)。
 
-> 本文对应 **1.1.0 候选版本**。若发布页尚无 1.1.0 安装包，请从源码构建；旧版本的功能与安全边界不同。
+> 本文对应 **1.1.1-beta.1 预发布版本**。安装包以 [GitHub Releases](https://github.com/jayson-sheyue/mac-slim/releases) 实际列出的资产为准；旧版本的功能与安全边界不同。
 
 [安装与构建说明](#安装与使用) · [查看具体清理规则](#具体扫描规则)
 
@@ -75,6 +75,8 @@ MacSlim 会识别历史日志文件，保留近期修改的内容。正在排查
 
 普通用户无需安装 Python、Node.js 或 Swift。下载 [Releases](https://github.com/jayson-sheyue/mac-slim/releases) 中对应版本的 Universal DMG，打开后把 MacSlim.app 拖入“应用程序”。本地构建的候选包位于 `dist/`；存在本地候选包不代表对应版本已在 GitHub 正式发布。
 
+正式应用的固定启动位置是 `/Applications/MacSlim.app`。从 DMG 或其他位置打开新版本副本，会转到已安装的应用；尚未安装时会提示先安装。同一用户同时启动多个新版本时，只保留一个清理进程。
+
 当前使用 Ad-hoc 签名，尚未完成 Developer ID 签名与 Apple 公证。下载后首次启动可能被 Gatekeeper 阻止。确认来源后，按照 [Apple 官方说明](https://support.apple.com/en-gb/102445)在“系统设置 → 隐私与安全性”中查看“仍要打开”。不需要关闭系统安全保护。
 
 1. 点击“开始扫描”。扫描与清理不联网。
@@ -140,6 +142,19 @@ MacSlim 会识别历史日志文件，保留近期修改的内容。正在排查
 - 构建生成 arm64 与 x86_64 通用应用、DMG、SHA256SUMS.txt 和 release-manifest.json，并核对版本、签名与校验值。
 - CI 配置 macOS 15（arm64、Intel）与 macOS 26 检查。配置存在不等于此次已在远程执行。
 - `--self-check` 只核对启动和版本身份，不替代完整界面、安装或清理测试。程序没有面向用户的命令行清理接口；不支持 Windows、Linux 或无桌面的远程清理。
+
+维护者发布并同步本机时使用：
+
+```sh
+./scripts/publish_release.sh --prerelease
+# 正式版本经过相应验收后，使用 --stable
+```
+
+脚本要求源码已提交、推送且对应提交的 CI 通过。只构建一次，先上传草稿，再回下载并校验同一份 DMG，从镜像安装至 `/Applications/MacSlim.app`，核对完整文件树、版本、源码提交与唯一运行进程，最后才公开 Release。中断后重跑会使用原草稿资产，不重新打包覆盖。它需要维护者已登录 GitHub CLI、本机 Python 3 和应用目录写入权限；普通用户运行 App 无需这些工具。
+
+更新前会请求 MacSlim 正常退出；有未完成任务时中止，不强杀。确认身份的旧应用及测试副本先压缩并验证备份，再移除可运行副本；安装失败会尝试回滚。备份及安装凭据保存在 `~/Library/Application Support/MacSlim/InstallBackups/`，项目旧构建另存于 `.build/prior-artifacts/`；设置与清理恢复记录保留。发布后的产物校验可重复执行 `./scripts/verify_release.sh`。应用内“检查更新”只下载校验，手工安装不等于执行这套维护者发布流程。
+
+固定入口和进程锁约束此版本及后续沿用该机制的构建，不能阻止用户另外下载并运行不具备此保护的旧版本，也不跨 macOS 用户账户互斥。
 
 具体用例、支持矩阵和尚需验证的环境见 [docs/testing.md](docs/testing.md)。
 

@@ -8,3 +8,5 @@ dist/
 .build/
 *.xcodeproj/project.xcworkspace/
 *.xcodeproj/xcuserdata/
+
+__pycache__/
