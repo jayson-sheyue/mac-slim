@@ -159,5 +159,35 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(list(applications.glob('.MacSlim-install-*')), [])
         self.assertTrue(list(home.rglob('*.zip')))
 
+    def test_image_detach_retries_only_temporary_busy_errors(self):
+        busy = subprocess.CalledProcessError(16, ['hdiutil', 'detach'], stderr='Resource busy')
+        with patch.object(installer, 'run', side_effect=[busy, '']) as command, patch.object(installer.time, 'sleep') as pause:
+            installer.detach_image(self.root / 'image')
+        self.assertEqual(command.call_count, 2)
+        pause.assert_called_once_with(1)
+        denied = subprocess.CalledProcessError(1, ['hdiutil', 'detach'], stderr='permission denied')
+        with patch.object(installer, 'run', side_effect=denied) as command, patch.object(installer.time, 'sleep') as pause:
+            with self.assertRaisesRegex(RuntimeError, 'temporary mount retained'):
+                installer.detach_image(self.root / 'image')
+        self.assertEqual(command.call_count, 1)
+        pause.assert_not_called()
+
+    def test_permanently_busy_mount_is_retained_without_recursive_cleanup(self):
+        directory = self.root / 'mount-work'; directory.mkdir()
+        mountpoint = directory / 'image'; mountpoint.mkdir()
+        sentinel = mountpoint / 'MacSlim.app'; sentinel.mkdir()
+        busy = subprocess.CalledProcessError(16, ['hdiutil', 'detach'], stderr='Resource busy')
+        def command(*args, **kwargs):
+            if args[1] == 'detach':
+                raise busy
+            return ''
+        with patch.object(installer.tempfile, 'mkdtemp', return_value=str(directory)), patch.object(installer, 'run', command), \
+             patch.object(installer.time, 'sleep'), patch.object(installer.shutil, 'rmtree') as remove:
+            with self.assertRaisesRegex(RuntimeError, 'temporary mount retained'):
+                with installer.mounted(self.root / 'release.dmg'):
+                    pass
+            remove.assert_not_called()
+        self.assertTrue(sentinel.is_dir())
+
 if __name__ == '__main__':
     unittest.main()

@@ -86,15 +86,39 @@ def inventory(extra=()):
     return list(found.values())
 
 
+def detach_image(mountpoint):
+    for attempt in range(3):
+        try:
+            run('/usr/bin/hdiutil', 'detach', mountpoint)
+            return
+        except subprocess.CalledProcessError as error:
+            busy = error.returncode == 16 or 'Resource busy' in (error.stderr or '')
+            if not busy or attempt == 2:
+                raise RuntimeError(f'Could not detach image at {mountpoint}; temporary mount retained for safe cleanup') from error
+            time.sleep(attempt + 1)
+
+
 @contextmanager
 def mounted(dmg):
-    with tempfile.TemporaryDirectory(prefix='macslim-mount-') as directory:
-        mountpoint = Path(directory) / 'image'
+    # Never let TemporaryDirectory recursively remove a still-mounted filesystem.
+    directory = Path(tempfile.mkdtemp(prefix='macslim-mount-'))
+    mountpoint = directory / 'image'
+    try:
         run('/usr/bin/hdiutil', 'attach', '-readonly', '-nobrowse', '-mountpoint', mountpoint, dmg)
-        try:
-            yield mountpoint
-        finally:
-            run('/usr/bin/hdiutil', 'detach', mountpoint)
+    except BaseException:
+        if mountpoint.is_mount():
+            detach_image(mountpoint)
+        if mountpoint.exists():
+            mountpoint.rmdir()
+        directory.rmdir()
+        raise
+    try:
+        yield mountpoint
+    finally:
+        detach_image(mountpoint)
+        if mountpoint.exists():
+            mountpoint.rmdir()
+        directory.rmdir()
 
 
 def validate_source(dmg, manifest):
