@@ -2,7 +2,7 @@
 
 原生 macOS 瘦身工具，帮你找出软件更新后留下的安装包、积累的缓存和历史日志，检查后再清理。面向 macOS 13 及以上，提供 Apple Silicon 和 Intel 通用构建；已验证的环境见[测试记录](docs/testing.md)。
 
-> 本文对应 **1.1.1-beta.2 预发布版本**。安装包以 [GitHub Releases](https://github.com/jayson-sheyue/mac-slim/releases) 实际列出的资产为准；旧版本的功能与安全边界不同。
+> 本文对应 **1.1.1-beta.3 预发布版本**。安装包以 [GitHub Releases](https://github.com/jayson-sheyue/mac-slim/releases) 实际列出的资产为准；旧版本的功能与安全边界不同。
 
 [安装与构建说明](#安装与使用) · [查看具体清理规则](#具体扫描规则)
 
@@ -100,7 +100,7 @@ MacSlim 会识别历史日志文件，保留近期修改的内容。正在排查
 | --- | --- | --- |
 | Electron 更新残留 | `~/Library/Caches/*.ShipIt/update.*`，适用于使用该更新结构的应用 | 建议清理过期目录；关联应用或目录中的更新进程运行时跳过 |
 | Sparkle 更新残留 | 缓存目录中的 `org.sparkle-project.Sparkle/Installation/*` | 建议清理过期安装包 |
-| 其他更新器 | 沙盒 `Data/Library/Global/UpdatePackages/*`、`LarkShell/update/*`、`GoogleUpdater/crx_cache/*` | 建议清理过期子项，不删除容器或用户数据目录 |
+| 其他更新器 | 沙盒 `Data/Library/Global/UpdatePackages/*`、`LarkShell/update/*`、`GoogleUpdater/crx_cache/*` | 默认不选，请确认子项用途；目录名不足以证明可删 |
 | 应用缓存 | `~/Library/Caches/<应用>/*`，以及 Application Support 中明确的 Cache / Caches / Code Cache / GPUCache / CacheStorage 等目录 | 请先检查，默认不选；并非所有放在 Caches 的内容都可无代价重建 |
 | 浏览器离线资源 | 如 Chrome、其他 Chromium 应用的 `Service Worker/CacheStorage` | 请先检查；清理可能失去离线资源，需要联网重新获取 |
 | 历史日志 | `~/Library/Logs` 及应用支持目录中 `logs` / `log` 下的 `.log`、轮转日志、`.ips`、`.crash` 文件 | 建议清理过期文件，保留近期写入的日志 |
@@ -116,7 +116,7 @@ MacSlim 会识别历史日志文件，保留近期修改的内容。正在排查
 
 - 不修改已安装的应用包，不裁剪二进制架构，不重签第三方应用。旧内核是否可安全删除取决于应用打包、签名和运行方式，`Current` 未指向它不足以证明可删，请使用应用官方更新或重新安装处理。
 - 不再提供 Cursor 数据库重建、历史对话删除或休眠应用卸载。不会因为一个应用很久没打开就删除它及其容器。
-- 缓存候选若含 Cookie、Login Data、Bookmarks、密码/钥匙串、数据库等个人数据特征，会保留并给出提示。不会扫描普通 Documents、聊天存储、草稿等目录。但无法推断所有第三方应用自定义格式，未知缓存仍需人工检查。
+- 更新残留与缓存候选若含 Cookie、Login Data、Bookmarks、密码/钥匙串、数据库等个人数据特征，会保留并给出提示。不会扫描普通 Documents、聊天存储、草稿等目录。但无法推断所有第三方应用自定义格式，未知缓存仍需人工检查。
 - 不清理 Playwright 正在使用或仍被登记包引用的浏览器；Playwright-Go 和无法验证引用的运行时保留。使用未登记的包或自定义浏览器路径时，不要清理依赖的版本。
 - 不对任何第三方应用或未来版本承诺“100% 零副作用”。应用升级可能改变目录用途，近期内容、符号链接重定向、跨卷路径和扫描后变化的项目会跳过。
 

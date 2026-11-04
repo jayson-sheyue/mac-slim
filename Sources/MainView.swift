@@ -26,7 +26,7 @@ public struct MainView: View {
                         filterRow(category.title, icon: category.iconName, category: category)
                     }
                     Spacer()
-                    Text("不修改已安装应用，不清理数据库、聊天记录、文档或当前使用的 Playwright 浏览器。").font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text("不修改已安装应用。含已识别个人数据的项目会保留；未知内容请先检查。").font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                     if let disk = store.diskUsage {
                         Text("磁盘可用 \(ByteFormatting.string(fromBytes: disk.availableBytes)) / \(ByteFormatting.string(fromBytes: disk.totalBytes))").font(.caption).foregroundColor(.secondary)
                     } else { Text("磁盘容量暂不可用").font(.caption).foregroundColor(.secondary) }

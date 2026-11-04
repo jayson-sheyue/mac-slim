@@ -10,14 +10,14 @@ import subprocess
 import tempfile
 import time
 import uuid
-import zipfile
-from contextlib import contextmanager
+import stat
+import grp
+from contextlib import contextmanager, ExitStack
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CANONICAL = Path('/Applications/MacSlim.app')
 REGISTRY = '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
-REVIEW_BUILDS = Path('/private/tmp/macslim-review')
 IDS = {'com.macslim.cleaner', 'com.macslim.fixture', 'com.macslim.fixture.dark'}
 
 
@@ -156,6 +156,55 @@ def archive_app(path, backup):
     return {'originalPath': str(path), 'archive': str(output), 'sha256': sha(output)}
 
 
+@contextmanager
+def anchored_bundle(path):
+    """Hold ancestry open; never resolve a deletion source again by absolute path.
+
+    Only this user/root may control the ancestry. Root-owned sticky directories
+    allow private temp fixtures; the following component must still be trusted.
+    macOS administrators are already authorized to replace /Applications apps.
+    """
+    path = Path(path)
+    if not path.is_absolute() or '..' in path.parts:
+        raise RuntimeError(f'Unsafe application path: {path}')
+    descriptors = []
+    try:
+        descriptor = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(descriptor)
+        for component in path.parts[1:]:
+            parent = descriptor
+            descriptor = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            descriptors.append(descriptor)
+            status = os.fstat(descriptor)
+            admin_group = status.st_uid == 0 and status.st_gid == grp.getgrnam('admin').gr_gid
+            sticky_root = status.st_uid == 0 and bool(status.st_mode & stat.S_ISVTX)
+            if status.st_uid not in {0, os.getuid()} or (
+                status.st_mode & 0o022 and not sticky_root and not (admin_group and not status.st_mode & 0o002)
+            ):
+                raise RuntimeError(f'Untrusted writable application ancestry: {path}')
+        identity = os.fstat(descriptor)
+        yield parent, (identity.st_dev, identity.st_ino)
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def relocate_verified(path, anchor, destination, expected):
+    """Rename the anchored object into private storage before any recursive delete.
+
+    Cross-volume moves fail closed. Never copy/delete through the original path.
+    A mismatch after rename is retained for inspection, including on failure.
+    """
+    parent, identity = anchor
+    current = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+    if (current.st_dev, current.st_ino) != identity or not stat.S_ISDIR(current.st_mode):
+        raise RuntimeError(f'Application changed after backup: {path}')
+    os.rename(path.name, destination, src_dir_fd=parent)
+    moved = destination.lstat()
+    if (moved.st_dev, moved.st_ino) != identity or tree(destination) != expected:
+        raise RuntimeError(f'Application changed; retained without deletion at {destination}')
+
+
 def unregister(path):
     subprocess.run([REGISTRY, '-u', str(path)], check=False, capture_output=True)
 
@@ -208,7 +257,7 @@ def install(args):
     # Never remove a running app or force-terminate a busy one.
     if json.loads(run(helper, 'inventory')):
         raise RuntimeError('MacSlim is still running; installation canceled')
-    with mounted(args.dmg) as image, tempfile.TemporaryDirectory(prefix='.MacSlim-install-', dir=CANONICAL.parent) as staging:
+    with ExitStack() as anchors, mounted(args.dmg) as image, tempfile.TemporaryDirectory(prefix='.MacSlim-install-', dir=CANONICAL.parent) as staging:
         source = image / 'MacSlim.app'
         validate_bundle(source, metadata)
         expected = tree(source)
@@ -219,15 +268,22 @@ def install(args):
         if tree(staged) != expected:
             raise RuntimeError('Staged installation differs from the DMG')
         replaced = False
+        verified = {}
         try:
             for row in copies:
                 path = Path(row['path'])
                 if str(path).startswith('/Volumes/'):
                     raise RuntimeError('An older MacSlim disk image is still mounted; eject it before installing')
+                anchor = anchors.enter_context(anchored_bundle(path))
+                snapshot = tree(path)
                 receipt['backups'].append(archive_app(path, backup))
+                if tree(path) != snapshot:
+                    raise RuntimeError(f'Application changed during backup: {path}')
+                verified[str(path)] = (anchor, snapshot)
             if CANONICAL.exists():
                 unregister(CANONICAL)
-                CANONICAL.rename(old)
+                anchor, snapshot = verified[str(CANONICAL)]
+                relocate_verified(CANONICAL, anchor, old, snapshot)
             staged.rename(CANONICAL)
             replaced = True
             validate_bundle(CANONICAL, metadata)
@@ -237,24 +293,14 @@ def install(args):
                 path = Path(row['path'])
                 if path == CANONICAL:
                     continue
+                anchor, snapshot = verified[str(path)]
+                quarantine = backup / ('retained-' + uuid.uuid4().hex)
+                quarantine.mkdir(mode=0o700)
+                destination = quarantine / path.name
+                relocate_verified(path, anchor, destination, snapshot)
                 unregister(path)
-                shutil.rmtree(path)
-            # Archive standalone GUI binaries left by this project's previous review builds.
-            temporary_builds = REVIEW_BUILDS
-            if temporary_builds.is_dir():
-                raw = [p for p in temporary_builds.iterdir() if p.is_file() and not p.is_symlink() and p.name.startswith('MacSlim') and os.access(p, os.X_OK)]
-                for path in raw:
-                    destination = backup / (path.name + '.zip')
-                    original_hash = sha(path)
-                    with zipfile.ZipFile(destination, 'w', zipfile.ZIP_DEFLATED) as archive:
-                        archive.write(path, path.name)
-                    with zipfile.ZipFile(destination) as archive:
-                        if hashlib.sha256(archive.read(path.name)).hexdigest() != original_hash:
-                            raise RuntimeError('Standalone backup failed verification')
-                    if sha(path) != original_hash:
-                        raise RuntimeError('Standalone binary changed during backup')
-                    path.unlink()
-                    receipt['backups'].append({'originalPath': str(path), 'archive': str(destination), 'sha256': sha(destination)})
+                shutil.rmtree(destination)
+                quarantine.rmdir()
             run(REGISTRY, '-f', CANONICAL)
             run(helper, 'launch', CANONICAL)
             receipt['runningIdentity'] = wait_identity(metadata, helper)

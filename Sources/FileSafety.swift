@@ -59,10 +59,11 @@ public enum FileSafety {
         let target = try stamp(FileManager.default.fileExists(atPath: path) ? path : URL(fileURLWithPath: path).deletingLastPathComponent().path)
         guard base.device == target.device else { throw SafetyError.refused("目标位于其他磁盘，已跳过") }
     }
-    public static func tree(_ path: String, rejectProtectedData: Bool = false) throws -> TreeStamp {
+    public static func tree(_ path: String, rejectProtectedData: Bool = false, includeContent: Bool = true) throws -> TreeStamp {
         let fm = FileManager.default
         let root = try stamp(path)
         var digest = SHA256()
+        var contentDigest = SHA256()
         var allocated: Int64 = 0
         var newest = root.modified
         let pathRoot = path
@@ -79,16 +80,37 @@ public enum FileSafety {
             let type = a[.type] as? FileAttributeType
             let relative = path == pathRoot ? "." : String(path.dropFirst(pathRoot.count))
             digest.update(data: Data("\(relative.utf8.count):\(relative)|\(s.device)|\(s.inode)|\(s.modified.timeIntervalSince1970)|\(s.size)|\(type?.rawValue ?? "")\n".utf8))
+            if includeContent { contentDigest.update(data: Data("\(relative.utf8.count):\(relative)|".utf8)) }
             newest = max(newest, s.modified)
             if type == .typeDirectory {
                 for child in try fm.contentsOfDirectory(atPath: path).sorted() { try visit(path + "/" + child) }
             } else if type == .typeRegular {
+                if includeContent {
+                    let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+                    guard descriptor >= 0 else { throw SafetyError.refused("无法安全读取文件内容") }
+                    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+                    defer { try? handle.close() }
+                    var identity = stat()
+                    guard fstat(descriptor, &identity) == 0, (identity.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+                          UInt64(identity.st_ino) == s.inode,
+                          UInt64(identity.st_dev) == s.device else { throw SafetyError.refused("读取时文件身份变化") }
+                    var fileDigest = SHA256()
+                    while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+                        try Task.checkCancellation()
+                        fileDigest.update(data: chunk)
+                    }
+                    contentDigest.update(data: Data(fileDigest.finalize()))
+                }
                 let v = try URL(fileURLWithPath: path).resourceValues(forKeys: [.fileAllocatedSizeKey, .fileSizeKey])
                 allocated += Int64(v.fileAllocatedSize ?? v.fileSize ?? 0)
+            } else if type == .typeSymbolicLink && includeContent {
+                contentDigest.update(data: Data(try fm.destinationOfSymbolicLink(atPath: path).utf8))
             } // Symlinks inside archives are counted as leaves and never followed.
+            guard try stamp(path) == s else { throw SafetyError.refused("读取时内容已变化，请重新扫描") }
         }
         try visit(path)
         return TreeStamp(root: root, fingerprint: digest.finalize().map { String(format: "%02x", $0) }.joined(),
+                         contentFingerprint: includeContent ? contentDigest.finalize().map { String(format: "%02x", $0) }.joined() : nil,
                          allocatedBytes: allocated, newestModification: newest)
     }
 }

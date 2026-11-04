@@ -5,6 +5,7 @@ import json
 import os
 import plistlib
 import subprocess
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,6 +58,58 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(source.exists())
         self.assertEqual(list(backup.iterdir()), [])
 
+    def test_anchored_move_survives_ancestor_symlink_substitution(self):
+        parent = self.root / 'owned'; parent.mkdir()
+        original = self.app(parent / 'Useful.app', content=b'bait')
+        victim = self.app(self.root / 'victim/Useful.app', content=b'private user app')
+        backup = self.root / 'backups'; backup.mkdir(mode=0o700)
+        with installer.anchored_bundle(original) as anchor:
+            expected = installer.tree(original)
+            receipt = installer.archive_app(original, backup)
+            parent.rename(self.root / 'displaced')
+            parent.symlink_to(victim.parent)
+            moved = backup / 'retained.app'
+            installer.relocate_verified(original, anchor, moved, expected)
+            self.assertEqual(expected, installer.tree(moved))
+            shutil.rmtree(moved)
+        self.assertEqual((victim / 'Contents/MacOS/MacSlim').read_bytes(), b'private user app')
+        self.assertTrue(Path(receipt['archive']).is_file())
+        self.assertFalse((self.root / 'displaced/Useful.app').exists())
+
+    def test_replacement_after_backup_is_not_moved_or_deleted(self):
+        source = self.app(self.root / 'MacSlim.app')
+        with installer.anchored_bundle(source) as anchor:
+            expected = installer.tree(source)
+            source.rename(self.root / 'original.app')
+            self.app(source, content=b'unbacked replacement')
+            with self.assertRaisesRegex(RuntimeError, 'changed after backup'):
+                installer.relocate_verified(source, anchor, self.root / 'moved.app', expected)
+        self.assertEqual((source / 'Contents/MacOS/MacSlim').read_bytes(), b'unbacked replacement')
+        self.assertFalse((self.root / 'moved.app').exists())
+
+    def test_content_change_after_backup_is_retained_without_recursive_delete(self):
+        source = self.app(self.root / 'MacSlim.app')
+        moved = self.root / 'retained.app'
+        with installer.anchored_bundle(source) as anchor:
+            expected = installer.tree(source)
+            (source / 'Contents/MacOS/MacSlim').write_bytes(b'changed data')
+            with self.assertRaisesRegex(RuntimeError, 'retained without deletion'):
+                installer.relocate_verified(source, anchor, moved, expected)
+        self.assertEqual((moved / 'Contents/MacOS/MacSlim').read_bytes(), b'changed data')
+
+    def test_untrusted_writable_ancestry_and_existing_symlink_refused(self):
+        parent = self.root / 'shared'; parent.mkdir(); parent.chmod(0o777)
+        source = self.app(parent / 'MacSlim.app')
+        with self.assertRaisesRegex(RuntimeError, 'Untrusted writable'):
+            with installer.anchored_bundle(source):
+                self.fail('unsafe ancestry accepted')
+        parent.chmod(0o700)
+        link = self.root / 'redirect'; link.symlink_to(parent)
+        with self.assertRaises(OSError):
+            with installer.anchored_bundle(link / 'MacSlim.app'):
+                self.fail('symlink ancestry accepted')
+        self.assertTrue(source.exists())
+
     def test_wrong_dmg_never_reaches_installation(self):
         dmg = self.root / 'wrong.dmg'; dmg.write_bytes(b'wrong')
         manifest = self.root / 'manifest.json'
@@ -108,7 +161,7 @@ class InstallTests(unittest.TestCase):
         import argparse
         args = argparse.Namespace(dmg=dmg, manifest=manifest, helper='/fixture/helper', receipt=self.root/'receipt.json')
         copies = [{'path': str(canonical), 'id': 'com.macslim.cleaner', 'version': 'old', 'build': '100'}]
-        with patch.object(installer, 'REVIEW_BUILDS', self.root / 'unused'), patch.object(installer, 'CANONICAL', canonical), patch.object(installer, 'inventory', return_value=copies), \
+        with patch.object(installer, 'CANONICAL', canonical), patch.object(installer, 'inventory', return_value=copies), \
              patch.object(installer, 'mounted', mounted), patch.object(installer, 'validate_bundle'), \
              patch.object(installer, 'unregister'), patch.object(installer, 'run', command), patch.object(Path, 'home', return_value=home):
             with self.assertRaisesRegex(RuntimeError, 'simulated launch failure'):
@@ -129,6 +182,10 @@ class InstallTests(unittest.TestCase):
         manifest = self.root / 'release-manifest.json'
         metadata = {'sha256': installer.sha(dmg), 'sizeBytes': 7, 'sourceCommit': 'a'*40, 'version': '1.1.1-beta.2', 'buildNumber': 112}
         manifest.write_text(json.dumps(metadata))
+        duplicate = self.app(self.root / 'Duplicate.app', content=b'old duplicate')
+        victim = self.root / 'private-documents'; victim.mkdir()
+        raw = victim / 'MacSlim-important-work.sh'; raw.write_bytes(b'keep me'); raw.chmod(0o700)
+        review_root = self.root / 'macslim-review'; review_root.symlink_to(victim)
         real_run = installer.run
 
         def command(*args, **kwargs):
@@ -140,6 +197,8 @@ class InstallTests(unittest.TestCase):
 
         def inventory(_):
             paths = [canonical, *applications.glob('.MacSlim-install-*/old.app')]
+            if duplicate.exists():
+                paths.append(duplicate)
             return [{'path': str(path), 'id': 'com.macslim.cleaner'} for path in paths]
 
         @contextlib.contextmanager
@@ -148,13 +207,16 @@ class InstallTests(unittest.TestCase):
 
         import argparse
         args = argparse.Namespace(dmg=dmg, manifest=manifest, helper='/fixture/helper', receipt=self.root/'receipt.json')
-        with patch.object(installer, 'REVIEW_BUILDS', self.root / 'unused'), patch.object(installer, 'CANONICAL', canonical), \
+        with patch.object(installer, 'REVIEW_BUILDS', review_root, create=True), patch.object(installer, 'CANONICAL', canonical), \
              patch.object(installer, 'inventory', inventory), patch.object(installer, 'mounted', mounted), \
              patch.object(installer, 'validate_bundle'), patch.object(installer, 'unregister'), \
              patch.object(installer, 'wait_identity', return_value={'pid': '123'}), patch.object(installer, 'run', command), \
              patch.object(Path, 'home', return_value=home), patch('builtins.print'):
             installer.install(args)
         self.assertEqual(expected, installer.tree(canonical))
+        self.assertFalse(duplicate.exists())
+        self.assertEqual(raw.read_bytes(), b'keep me')
+        self.assertTrue(review_root.is_symlink())
         self.assertTrue(Path(args.receipt).exists())
         self.assertEqual(list(applications.glob('.MacSlim-install-*')), [])
         self.assertTrue(list(home.rglob('*.zip')))

@@ -61,7 +61,7 @@ public struct ScannerEngine: Sendable {
                 guard inspectionOnly || !activity.isBusy(path: path, bundleIDs: matching.map(\.bundleID), appPaths: matching.map(\.path)) else {
                     warn("已跳过正在使用的项目：\(display(path))"); return
                 }
-                let stamp = try FileSafety.tree(path, rejectProtectedData: !inspectionOnly && category != .updaterLeftovers)
+                let stamp = try FileSafety.tree(path, rejectProtectedData: !inspectionOnly, includeContent: !inspectionOnly)
                 guard stamp.allocatedBytes >= minimumBytes else { return }
                 if !inspectionOnly && stamp.newestModification > cutoff { return }
                 seen.insert(path)
@@ -117,8 +117,8 @@ public struct ScannerEngine: Sendable {
                 return
             }
             if name == "updatepackages" || name == "crx_cache" || (name == "update" && path.lowercased().contains("/larkshell/")) {
-                children(path, category: .updaterLeftovers, tier: .safe, reason: "更新器的历史安装包目录",
-                         impact: "仅列出超过保留天数未修改的文件；以后更新可能需要重新下载。")
+                children(path, category: .updaterLeftovers, tier: .review, reason: "更新器的历史安装包目录",
+                         impact: "目录名不能证明内容可删除，请先检查；以后更新可能需要重新下载。")
                 return
             }
             if name == "logs" || name == "log" { scanLogs(path, depth: 0); return }
@@ -161,8 +161,8 @@ public struct ScannerEngine: Sendable {
             let data = library + "/Containers/" + entry + "/Data/Library"
             let updater = data + "/Global/UpdatePackages"
             if directory(updater) {
-                children(updater, category: .updaterLeftovers, tier: .safe, reason: "沙盒应用更新包目录",
-                         impact: "只处理历史安装包，不扫描容器中的文档或聊天数据库。")
+                children(updater, category: .updaterLeftovers, tier: .review, reason: "沙盒应用更新包目录",
+                         impact: "请先确认这些是历史安装包；包含已识别个人数据的项目会保留。")
             }
             if directory(data + "/Logs") { scanLogs(data + "/Logs", depth: 0) }
             if directory(data + "/Caches") {

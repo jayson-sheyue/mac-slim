@@ -59,7 +59,7 @@ public struct CleanerEngine: Sendable {
             }
             try FileSafety.validate(item.path, roots: environment.writableRoots)
             try validateRulePath(item)
-            let current = try FileSafety.tree(item.path, rejectProtectedData: item.category != .updaterLeftovers)
+            let current = try FileSafety.tree(item.path, rejectProtectedData: true)
             guard current == item.stamp else { throw SafetyError.refused("扫描后内容已变化，请重新扫描") }
             let running = activity()
             guard !running.isBusy(path: item.path, bundleIDs: item.ownerBundleIDs, appPaths: item.ownerAppPaths) else {
@@ -157,7 +157,7 @@ public struct CleanerEngine: Sendable {
         // System trash can reside in .Trashes/<uid> on another volume. This version only cleans home-volume data.
         try FileSafety.validate(trash, roots: trashRoots)
         let current = try FileSafety.stamp(trash)
-        guard current == entry.stamp, try FileSafety.tree(trash) == entry.tree else { throw SafetyError.refused("废纸篓项目已变化，已停止自动恢复") }
+        guard current == entry.stamp, try FileSafety.tree(trash, includeContent: entry.tree.contentFingerprint != nil) == entry.tree else { throw SafetyError.refused("废纸篓项目已变化，已停止自动恢复") }
         guard !fm.fileExists(atPath: entry.originalPath) else { throw SafetyError.refused("原位置已有文件，未覆盖。请先在访达中处理冲突。") }
         let parent = URL(fileURLWithPath: entry.originalPath).deletingLastPathComponent().path
         guard fm.fileExists(atPath: parent) else { throw SafetyError.refused("原父目录已不存在，请从废纸篓手动恢复") }

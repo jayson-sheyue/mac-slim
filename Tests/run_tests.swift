@@ -119,6 +119,18 @@ struct MacSlimTests {
             try fm.createSymbolicLink(atPath: versions + "/Current", withDestinationPath: "2.0")
             let plist: [String: Any] = ["CFBundleIdentifier": "io.example.NovelEditor", "CFBundleDisplayName": "NovelEditor"]
             try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: URL(fileURLWithPath: app + "/Contents/Info.plist"))
+            let updaterRoots = [
+                home + "/Library/Caches/io.example.Private.ShipIt/update.old",
+                home + "/Library/Caches/io.example.Private/org.sparkle-project.Sparkle/Installation/old",
+                home + "/Library/Application Support/Unlisted/UpdatePackages/retained",
+                home + "/Library/Containers/io.example.private/Data/Library/Global/UpdatePackages/retained",
+                home + "/Library/Application Support/Private/LarkShell/update/retained",
+                home + "/Library/Application Support/Private/GoogleUpdater/crx_cache/retained"
+            ]
+            let protectedFiles = ["Cookies", "nested/Cookies-wal", "account.db", "nested/state.vscdb", "Documents/important.txt", "nested/messages.sqlite"]
+            for (path, name) in zip(updaterRoots, protectedFiles) { try file(path + "/" + name); try ageTree(path) }
+            let unknownUpdate = home + "/Library/Application Support/Unknown/UpdatePackages/work-notes.txt"
+            try file(unknownUpdate)
             let scanner = ScannerEngine(environment: env, activity: inactive)
             let report = await scanner.scan(config: ScannerConfig(minCacheSizeMB: 1, minimumAgeDays: 14)) { _ in }
             func found(_ path: String) -> ScanItem? { report.items.first { $0.path == path } }
@@ -143,6 +155,26 @@ struct MacSlimTests {
 
             let recovery = try RecoveryStore(directory: root.appendingPathComponent("Recovery"))
             let cleaner = CleanerEngine(environment: env, recovery: recovery, activity: inactive, testTrashDirectory: trash)
+            for (path, name) in zip(updaterRoots, protectedFiles) {
+                check(!report.items.contains { $0.path == path || FileSafety.isBelow(path, $0.path) }, "Updater personal data excluded from scan: " + name)
+                let forged = try item(path, category: .updaterLeftovers)
+                for mode in CleanExecutionMode.allCases {
+                    let result = await cleaner.cleanItem(forged, mode: mode)
+                    check(!result.success && fm.fileExists(atPath: path + "/" + name), "Execution protects stale/manual updater candidate: " + name + " " + mode.rawValue)
+                }
+            }
+            check(found(unknownUpdate)?.isSelected == false && found(meeting)?.isSelected == false && found(lark)?.isSelected == false && found(google)?.isSelected == false, "Generic updater markers require explicit review")
+            let sameMetadata = home + "/Library/Caches/Fixture/same-metadata.bin"
+            try file(sameMetadata)
+            let fixedDate = Date(timeIntervalSince1970: 1700000000)
+            try fm.setAttributes([.modificationDate: fixedDate], ofItemAtPath: sameMetadata)
+            let originalCandidate = try item(sameMetadata)
+            let writer = try FileHandle(forWritingTo: URL(fileURLWithPath: sameMetadata))
+            try writer.write(contentsOf: Data([66])); try writer.close()
+            try fm.setAttributes([.modificationDate: fixedDate], ofItemAtPath: sameMetadata)
+            let altered = try FileSafety.tree(sameMetadata)
+            check(altered.fingerprint == originalCandidate.stamp.fingerprint && altered.contentFingerprint != originalCandidate.stamp.contentFingerprint, "Byte fingerprint detects same-size same-inode restored-mtime edit")
+            check(!(await cleaner.cleanItem(originalCandidate, mode: .permanentDelete)).success && fm.fileExists(atPath: sameMetadata), "Same-metadata modified file survives cleanup")
             if let framework = found(versions + "/1.0") {
                 try fm.removeItem(atPath: versions + "/Current")
                 try fm.createSymbolicLink(atPath: versions + "/Current", withDestinationPath: "1.0")
@@ -158,6 +190,17 @@ struct MacSlimTests {
                 try await cleaner.restore(entries[0])
                 check(fm.fileExists(atPath: shipit + "/NovelEditor.app/Contents/MacOS/NovelEditor"), "Trash restore returns full archive and nested symlink to original path")
             }
+            let legacyPath = home + "/Library/Caches/Fixture/legacy.bin"
+            try file(legacyPath)
+            _ = await cleaner.cleanItem(try item(legacyPath), mode: .moveToTrash)
+            if let entry = await recovery.all().first(where: { $0.originalPath == legacyPath }) {
+                var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(entry)) as! [String: Any]
+                var treeJSON = json["tree"] as! [String: Any]
+                treeJSON.removeValue(forKey: "contentFingerprint"); json["tree"] = treeJSON
+                let legacy = try JSONDecoder().decode(RecoveryEntry.self, from: JSONSerialization.data(withJSONObject: json))
+                try await cleaner.restore(legacy)
+                check(fm.fileExists(atPath: legacyPath), "Pre-upgrade recovery record without content hash remains restorable")
+            } else { check(false, "Legacy recovery fixture created") }
             let conflict = home + "/Library/Caches/Fixture/conflict.bin"
             try file(conflict)
             let conflictResult = await cleaner.cleanItem(try item(conflict), mode: .moveToTrash)
