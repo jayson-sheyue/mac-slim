@@ -38,26 +38,44 @@ public enum FileSafety {
               let inode = (a[.systemFileNumber] as? NSNumber)?.uint64Value,
               let modified = a[.modificationDate] as? Date,
               let size = (a[.size] as? NSNumber)?.int64Value else {
-            throw SafetyError.refused("无法读取可靠的文件身份与时间信息")
+            throw SafetyError.refused(L10n.tr(
+                en: "Could not read reliable file identity and timestamp metadata",
+                ja: "信頼できるファイル識別情報と日時メタデータを読み取れませんでした",
+                zh: "无法读取可靠的文件身份与时间信息"
+            ))
         }
         return FileStamp(device: device, inode: inode, modified: modified, size: size)
     }
     public static func validate(_ path: String, roots: [String]) throws {
         guard path.hasPrefix("/"), !path.contains("//"), !path.components(separatedBy: "/").contains(where: { $0 == "." || $0 == ".." }),
               let root = roots.first(where: { isBelow(path, $0) }) else {
-            throw SafetyError.refused("路径不在允许的清理范围内")
+            throw SafetyError.refused(L10n.tr(
+                en: "Path is outside the allowed cleanup scope",
+                ja: "パスが許可されたクリーンアップ範囲外です",
+                zh: "路径不在允许的清理范围内"
+            ))
         }
         // Check every ancestor, including the allowed root. Never traverse redirected paths.
         var url = URL(fileURLWithPath: path)
         while url.path != "/" {
             if (try? FileManager.default.attributesOfItem(atPath: url.path)[.type]) as? FileAttributeType == .typeSymbolicLink {
-                throw SafetyError.refused("路径包含符号链接，已跳过")
+                throw SafetyError.refused(L10n.tr(
+                    en: "Path contains a symbolic link and was skipped",
+                    ja: "パスにシンボリックリンクが含まれるためスキップしました",
+                    zh: "路径包含符号链接，已跳过"
+                ))
             }
             url.deleteLastPathComponent()
         }
         let base = try stamp(root)
         let target = try stamp(FileManager.default.fileExists(atPath: path) ? path : URL(fileURLWithPath: path).deletingLastPathComponent().path)
-        guard base.device == target.device else { throw SafetyError.refused("目标位于其他磁盘，已跳过") }
+        guard base.device == target.device else {
+            throw SafetyError.refused(L10n.tr(
+                en: "Target is on a different volume and was skipped",
+                ja: "対象が別のディスク上にあるためスキップしました",
+                zh: "目标位于其他磁盘，已跳过"
+            ))
+        }
     }
     public static func tree(_ path: String, rejectProtectedData: Bool = false, includeContent: Bool = true) throws -> TreeStamp {
         let fm = FileManager.default
@@ -70,11 +88,21 @@ public enum FileSafety {
         func visit(_ path: String) throws {
             try Task.checkCancellation()
             let s = try stamp(path)
-            guard s.device == root.device else { throw SafetyError.refused("目录内存在其他挂载卷") }
+            guard s.device == root.device else {
+                throw SafetyError.refused(L10n.tr(
+                    en: "Directory contains another mounted volume",
+                    ja: "ディレクトリ内に別のマウント済みボリュームが存在します",
+                    zh: "目录内存在其他挂载卷"
+                ))
+            }
             let name = URL(fileURLWithPath: path).lastPathComponent.lowercased()
             let protectedNames: Set<String> = ["cookies", "cookies-journal", "login data", "login data-journal", "bookmarks", "bookmarks.bak", "history", "passwords", "keychains", "documents", "drafts", "chats", "messages", "local storage", "indexeddb", "session storage"]
             if rejectProtectedData && (protectedNames.contains(name) || ["cookies-", "login data-", "bookmarks-"].contains(where: { name.hasPrefix($0) }) || [".sqlite", ".vscdb", ".keychain"].contains(where: { name.contains($0) }) || name.hasSuffix(".db") || name.contains(".db-")) {
-                throw SafetyError.refused("包含数据库、凭据或个人数据特征，已保留")
+                throw SafetyError.refused(L10n.tr(
+                    en: "Preserved because database, credential, or personal data signatures were detected",
+                    ja: "データベース、資格情報、または個人データの特徴を検出したため保持しました",
+                    zh: "包含数据库、凭据或个人数据特征，已保留"
+                ))
             }
             let a = try fm.attributesOfItem(atPath: path)
             let type = a[.type] as? FileAttributeType
@@ -87,13 +115,25 @@ public enum FileSafety {
             } else if type == .typeRegular {
                 if includeContent {
                     let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
-                    guard descriptor >= 0 else { throw SafetyError.refused("无法安全读取文件内容") }
+                    guard descriptor >= 0 else {
+                        throw SafetyError.refused(L10n.tr(
+                            en: "Could not safely read file contents",
+                            ja: "ファイル内容を安全に読み取れませんでした",
+                            zh: "无法安全读取文件内容"
+                        ))
+                    }
                     let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
                     defer { try? handle.close() }
                     var identity = stat()
                     guard fstat(descriptor, &identity) == 0, (identity.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
                           UInt64(identity.st_ino) == s.inode,
-                          UInt64(identity.st_dev) == s.device else { throw SafetyError.refused("读取时文件身份变化") }
+                          UInt64(identity.st_dev) == s.device else {
+                        throw SafetyError.refused(L10n.tr(
+                            en: "File identity changed while reading",
+                            ja: "読み取り中にファイル識別情報が変化しました",
+                            zh: "读取时文件身份变化"
+                        ))
+                    }
                     var fileDigest = SHA256()
                     while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
                         try Task.checkCancellation()
@@ -106,7 +146,13 @@ public enum FileSafety {
             } else if type == .typeSymbolicLink && includeContent {
                 contentDigest.update(data: Data(try fm.destinationOfSymbolicLink(atPath: path).utf8))
             } // Symlinks inside archives are counted as leaves and never followed.
-            guard try stamp(path) == s else { throw SafetyError.refused("读取时内容已变化，请重新扫描") }
+            guard try stamp(path) == s else {
+                throw SafetyError.refused(L10n.tr(
+                    en: "Content changed during inspection; please scan again",
+                    ja: "読み取り中に内容が変化しました。再スキャンしてください",
+                    zh: "读取时内容已变化，请重新扫描"
+                ))
+            }
         }
         try visit(path)
         return TreeStamp(root: root, fingerprint: digest.finalize().map { String(format: "%02x", $0) }.joined(),

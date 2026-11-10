@@ -4,7 +4,7 @@ English · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 
 A native macOS cleanup utility that helps you inspect and remove leftover installer packages from app updates, accumulated caches, and historical logs. Built for macOS 13 and later as a Universal binary for Apple Silicon and Intel; see the [Testing Documentation](docs/testing.md) for verified environments.
 
-> This document corresponds to the **1.1.1-beta.3 pre-release**. Official installer packages are defined by the assets listed on [GitHub Releases](https://github.com/jayson-sheyue/mac-slim/releases); earlier versions have different feature sets and safety boundaries.
+> This document corresponds to the **1.1.1-beta.4 pre-release**. Official installer packages are defined by the assets listed on [GitHub Releases](https://github.com/jayson-sheyue/mac-slim/releases); earlier versions have different feature sets and safety boundaries.
 
 [Installation & Build Guide](#installation--usage) · [Specific Scan Rules](#specific-scan-rules)
 
@@ -81,15 +81,15 @@ The canonical launch location for the installed app is `/Applications/MacSlim.ap
 
 Builds currently use Ad-hoc code signing and have not yet undergone Developer ID signing or Apple notarization. On first launch after downloading, macOS Gatekeeper may block the app. After verifying the download source, follow [Apple's official guide](https://support.apple.com/en-gb/102445) to click **Open Anyway** in **System Settings → Privacy & Security**. You do not need to disable system security protections.
 
-1. Click **Start Scan** (`开始扫描`). Scanning and cleaning run completely offline.
+1. Click **Start Scan**. Scanning and cleaning run completely offline. The interface defaults to **English** on first launch and can be switched between `English`, `日本語`, and `中文` from the top toolbar or **Settings** without resetting your current scan results.
 2. Review the detection basis, impact description, and file path for each item. Recommended items are selected by default; unknown caches must be selected manually.
-3. The default mode is **Move to Trash** (`移至废纸篓`); **Permanent Delete** (`永久删除`) requires explicit confirmation and cannot be undone.
-4. Open **Cleanup History** (`清理记录`) to inspect results or restore items moved to Trash. Restoring will not overwrite newer files at the original path, and automatic restore is unavailable once Trash is emptied or the original parent directory no longer exists.
+3. The default mode is **Move to Trash**; **Delete Permanently** requires explicit confirmation and cannot be undone.
+4. Open **History** to inspect results or restore items moved to Trash. Restoring will not overwrite newer files at the original path, and automatic restore is unavailable once Trash is emptied or the original parent directory no longer exists.
 5. When permissions are insufficient, skipped paths are listed under warnings—do not interpret "0 items found" as "every protected directory was scanned." To scan protected directories, grant **Full Disk Access** to MacSlim in **System Settings → Privacy & Security → Full Disk Access**; never run the app as `root`.
 
 "Moved to Trash" means the file location changed, not that free disk space has already increased. Sizes are estimated from allocated blocks; APFS clones, snapshots, compression, and other processes affect actual space reclaimed.
 
-Clicking **Stop** (`停止`) halts subsequent items and waits for the in-flight file operation to finish. Operations already completed are not automatically rolled back. You cannot start a new scan or another cleanup batch while a cleanup operation is running.
+Clicking **Stop** halts subsequent items and waits for the in-flight file operation to finish. Operations already completed are not automatically rolled back. You cannot start a new scan or another cleanup batch while a cleanup operation is running.
 
 ## Specific Scan Rules
 
@@ -126,7 +126,7 @@ Scanning discovers applications in `/Applications`, `~/Applications`, and bounde
 
 Settings and recovery records are stored in `~/Library/Application Support/MacSlim/`. Upgrading from 1.0 preserves compatible minimum-size thresholds, while deprecated database, dormant-app, and custom update-feed settings are no longer active. Legacy history files are preserved on disk but are not imported as restorable records.
 
-You can adjust the minimum size threshold and retention days in **Settings** (`设置`). Network access occurs only when you click **Check for Updates** (`检查更新`), using the repository's fixed GitHub Release manifest feed. Downloaded packages must pass both byte-size and SHA-256 verification, are saved in isolated temporary directories while preserving macOS quarantine metadata, and never automatically replace a running application. Note that SHA-256 verifies file integrity, not publisher code signing or Apple notarization.
+You can switch the interface language (`English` / `日本語` / `中文`, defaulting to `English` on first launch) and adjust the minimum size threshold and retention days in **Settings**. Network access occurs only when you click **Check for Updates**, using the repository's fixed GitHub Release manifest feed. Downloaded packages must pass both byte-size and SHA-256 verification, are saved in isolated temporary directories while preserving macOS quarantine metadata, and never automatically replace a running application. Note that SHA-256 verifies file integrity, not publisher code signing or Apple notarization.
 
 Recovery records are written before moving files to Trash; if recovery storage is unavailable, moving to Trash is blocked. After an unexpected exit, pending recovery records are reconciled on launch. If the system Trash cannot be read, items must be restored manually in Finder. Do not delete `recovery-v1.json` manually if you expect the app to restore previously trashed items. Diagnostic summaries never contain file paths, access tokens, or raw task error messages, and are never uploaded automatically.
 

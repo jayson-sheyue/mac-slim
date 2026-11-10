@@ -144,7 +144,11 @@ public enum UpdateEvaluator {
     ) -> UpdateCompatibilityResult {
         guard let targetSemVer = SemVer(string: manifest.version),
               let currentSemVer = SemVer(string: currentVersion) else {
-            return .incompatibleSystem(reason: "更新清单版本号格式无效 (\(manifest.version))")
+            return .incompatibleSystem(reason: L10n.tr(
+                en: "Invalid version format in update manifest (\(manifest.version))",
+                ja: "更新マニフェストのバージョン形式が無効です (\(manifest.version))",
+                zh: "更新清单版本号格式无效 (\(manifest.version))"
+            ))
         }
 
         // 1. Channel filtering: stable users must never automatically receive beta/prerelease updates
@@ -161,8 +165,13 @@ public enum UpdateEvaluator {
 
         // 3. Architecture check
         if !manifest.supportedArchitectures.contains(currentArch) {
+            let archList = manifest.supportedArchitectures.joined(separator: ", ")
             return .incompatibleSystem(
-                reason: "新版 v\(manifest.version) 仅支持架构 [\(manifest.supportedArchitectures.joined(separator: ", "))]，当前本机为 \(currentArch)"
+                reason: L10n.tr(
+                    en: "New version v\(manifest.version) only supports [\(archList)]; current machine is \(currentArch)",
+                    ja: "新バージョン v\(manifest.version) はアーキテクチャ [\(archList)] のみ対応しています（現在のマシンは \(currentArch)）",
+                    zh: "新版 v\(manifest.version) 仅支持架构 [\(archList)]，当前本机为 \(currentArch)"
+                )
             )
         }
 
@@ -171,10 +180,18 @@ public enum UpdateEvaluator {
         }
         guard let minOS = osVersion(manifest.minSystemVersion), let curOS = osVersion(currentOSVersion),
               !minOS.isPrerelease, minOS.buildMetadata == nil else {
-            return .incompatibleSystem(reason: "更新清单系统版本格式无效")
+            return .incompatibleSystem(reason: L10n.tr(
+                en: "Invalid macOS version format in update manifest",
+                ja: "更新マニフェストのシステムバージョン形式が無効です",
+                zh: "更新清单系统版本格式无效"
+            ))
         }
         if curOS < minOS {
-            return .incompatibleSystem(reason: "新版需要 macOS \(manifest.minSystemVersion)，当前为 \(currentOSVersion)")
+            return .incompatibleSystem(reason: L10n.tr(
+                en: "New version requires macOS \(manifest.minSystemVersion) (current: \(currentOSVersion))",
+                ja: "新バージョンには macOS \(manifest.minSystemVersion) が必要です（現在: \(currentOSVersion)）",
+                zh: "新版需要 macOS \(manifest.minSystemVersion)，当前为 \(currentOSVersion)"
+            ))
         }
 
         return .updateAvailable(manifest)
@@ -209,16 +226,26 @@ public enum UpdateState: Equatable, Sendable {
     case readyToInstall(dmgPath: String, manifest: ReleaseManifest)
     case failed(reason: String, manualURL: String)
 
-    public var badgeLabel: String {
+    public var badgeLabel: String { badgeLabel(in: L10n.current) }
+
+    public func badgeLabel(in language: AppLanguage) -> String {
         switch self {
-        case .idle: return "检查更新"
-        case .checking: return "检查中..."
-        case .upToDate: return "已是最新"
-        case .updateAvailable(let m): return "新版本 v\(m.version)"
-        case .downloading(_, let v): return "下载 v\(v)..."
-        case .verifying(let v): return "校验 v\(v)..."
-        case .readyToInstall(_, let m): return "v\(m.version) 待安装"
-        case .failed: return "检查未完成"
+        case .idle:
+            return L10n.tr(en: "Check for Updates", ja: "アップデートを確認", zh: "检查更新", language: language)
+        case .checking:
+            return L10n.tr(en: "Checking...", ja: "確認中...", zh: "检查中...", language: language)
+        case .upToDate:
+            return L10n.tr(en: "Up to Date", ja: "最新です", zh: "已是最新", language: language)
+        case .updateAvailable(let m):
+            return L10n.tr(en: "New v\(m.version)", ja: "新バージョン v\(m.version)", zh: "新版本 v\(m.version)", language: language)
+        case .downloading(_, let v):
+            return L10n.tr(en: "Downloading v\(v)...", ja: "v\(v) をダウンロード中...", zh: "下载 v\(v)...", language: language)
+        case .verifying(let v):
+            return L10n.tr(en: "Verifying v\(v)...", ja: "v\(v) を検証中...", zh: "校验 v\(v)...", language: language)
+        case .readyToInstall(_, let m):
+            return L10n.tr(en: "v\(m.version) Ready", ja: "v\(m.version) 準備完了", zh: "v\(m.version) 待安装", language: language)
+        case .failed:
+            return L10n.tr(en: "Check Incomplete", ja: "確認未完了", zh: "检查未完成", language: language)
         }
     }
 
@@ -256,7 +283,11 @@ public actor UpdateService {
               let scheme = url.scheme?.lowercased(),
               (scheme == "https" || (scheme == "file" && allowLocalFiles)) else {
             return .failed(
-                reason: "更新源地址无效（仅支持安全的 HTTPS 或本地受控清单文件）",
+                reason: L10n.tr(
+                    en: "Invalid update feed URL (only secure HTTPS or controlled local manifest files are supported)",
+                    ja: "更新元の URL が無効です（安全な HTTPS または管理されたローカルマニフェストのみ対応）",
+                    zh: "更新源地址无效（仅支持安全的 HTTPS 或本地受控清单文件）"
+                ),
                 manualURL: AppMetadata.releasesPageURL
             )
         }
@@ -271,7 +302,11 @@ public actor UpdateService {
                 let (fetchedData, response) = try await URLSession.shared.data(for: request)
                 if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                     return .failed(
-                        reason: "更新服务器返回状态码 HTTP \(http.statusCode)（可能离线、限流或尚未发布 Release 清单）",
+                        reason: L10n.tr(
+                            en: "Update server returned HTTP \(http.statusCode) (offline, rate-limited, or release manifest not published yet)",
+                            ja: "更新サーバーが HTTP \(http.statusCode) を返しました（オフライン、レート制限、または Release マニフェスト未公開の可能性があります）",
+                            zh: "更新服务器返回状态码 HTTP \(http.statusCode)（可能离线、限流或尚未发布 Release 清单）"
+                        ),
                         manualURL: AppMetadata.releasesPageURL
                     )
                 }
@@ -297,7 +332,11 @@ public actor UpdateService {
             }
         } catch {
             return .failed(
-                reason: "无法获取更新清单（\(error.localizedDescription)）。你可以稍后重试或前往 GitHub Releases 查看。",
+                reason: L10n.tr(
+                    en: "Could not fetch update manifest (\(error.localizedDescription)). Please try again later or visit GitHub Releases.",
+                    ja: "更新マニフェストを取得できませんでした（\(error.localizedDescription)）。後で再試行するか GitHub Releases を確認してください。",
+                    zh: "无法获取更新清单（\(error.localizedDescription)）。你可以稍后重试或前往 GitHub Releases 查看。"
+                ),
                 manualURL: AppMetadata.releasesPageURL
             )
         }
@@ -315,7 +354,14 @@ public actor UpdateService {
               manifest.sizeBytes > 0, manifest.sizeBytes <= 1024 * 1024 * 1024,
               let url = URL(string: manifest.dmgUrl),
               url.scheme == "https" || (url.isFileURL && allowLocalFiles) else {
-            return .failed(reason: "更新清单中的地址、版本、体积或校验值无效", manualURL: AppMetadata.releasesPageURL)
+            return .failed(
+                reason: L10n.tr(
+                    en: "Invalid URL, version, size, or checksum in update manifest",
+                    ja: "更新マニフェスト内の URL、バージョン、サイズ、またはチェックサムが無効です",
+                    zh: "更新清单中的地址、版本、体积或校验值无效"
+                ),
+                manualURL: AppMetadata.releasesPageURL
+            )
         }
         // Each attempt owns a private directory; no shared predictable /tmp files.
         let parent = destinationDirectory ?? fm.temporaryDirectory
@@ -334,13 +380,23 @@ public actor UpdateService {
                 let (download, response) = try await URLSession.shared.download(for: request)
                 defer { try? fm.removeItem(at: download) }
                 guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode), response.url?.scheme == "https" else {
-                    throw SafetyError.refused("更新包下载失败或被重定向到不安全地址")
+                    throw SafetyError.refused(L10n.tr(
+                        en: "Update download failed or was redirected to an insecure URL",
+                        ja: "更新パッケージのダウンロードに失敗したか、安全でない URL へリダイレクトされました",
+                        zh: "更新包下载失败或被重定向到不安全地址"
+                    ))
                 }
                 try fm.moveItem(at: download, to: part)
             }
             try Task.checkCancellation()
             let size = (try fm.attributesOfItem(atPath: part.path)[.size] as? NSNumber)?.int64Value ?? 0
-            guard size == manifest.sizeBytes else { throw SafetyError.refused("安装包体积与更新清单不符") }
+            guard size == manifest.sizeBytes else {
+                throw SafetyError.refused(L10n.tr(
+                    en: "Installer size does not match the update manifest",
+                    ja: "インストーラのサイズが更新マニフェストと一致しません",
+                    zh: "安装包体积与更新清单不符"
+                ))
+            }
             await onPhase(.verifying(targetVersion: manifest.version))
             let handle = try FileHandle(forReadingFrom: part)
             defer { try? handle.close() }
@@ -350,20 +406,35 @@ public actor UpdateService {
                 hash.update(data: data)
             }
             guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == expected else {
-                throw SafetyError.refused("安装包 SHA-256 校验失败，未启用下载文件")
+                throw SafetyError.refused(L10n.tr(
+                    en: "Installer SHA-256 verification failed; downloaded file was not enabled",
+                    ja: "インストーラの SHA-256 検証に失敗したため、ダウンロードファイルを有効化しませんでした",
+                    zh: "安装包 SHA-256 校验失败，未启用下载文件"
+                ))
             }
             let final = work.appendingPathComponent("MacSlim-" + manifest.version + "-Universal.dmg")
             try fm.moveItem(at: part, to: final)
             if !url.isFileURL {
                 let quarantine = "0081;" + String(Int(Date().timeIntervalSince1970), radix: 16) + ";MacSlim;"
                 guard ProcessRunner.run("/usr/bin/xattr", ["-w", "com.apple.quarantine", quarantine, final.path]).status == 0 else {
-                    throw SafetyError.refused("无法保留系统下载安全标记，请从版本发布页手动下载")
+                    throw SafetyError.refused(L10n.tr(
+                        en: "Could not preserve macOS download quarantine metadata; please download manually from Releases",
+                        ja: "システムのダウンロード隔離属性を保持できませんでした。Releases ページから手動でダウンロードしてください",
+                        zh: "无法保留系统下载安全标记，请从版本发布页手动下载"
+                    ))
                 }
             }
             keep = true
             return .readyToInstall(dmgPath: final.path, manifest: manifest)
         } catch {
-            return .failed(reason: "更新包未启用：" + error.localizedDescription, manualURL: AppMetadata.releasesPageURL)
+            return .failed(
+                reason: L10n.tr(
+                    en: "Update package was not enabled: \(error.localizedDescription)",
+                    ja: "更新パッケージを有効化できませんでした: \(error.localizedDescription)",
+                    zh: "更新包未启用：" + error.localizedDescription
+                ),
+                manualURL: AppMetadata.releasesPageURL
+            )
         }
     }
 }

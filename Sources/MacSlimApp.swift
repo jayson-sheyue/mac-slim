@@ -16,6 +16,7 @@ struct MacSlimApp: App {
             print("MacSlim v\(AppMetadata.version) (build \(AppMetadata.buildNumber)) self-check OK | \(UpdateEvaluator.detectedArchitecture()) | macOS \(UpdateEvaluator.detectedOSVersionString())")
             exit(0)
         }
+        L10n.current = L10n.loadPersistedLanguage()
         // Dedicated fixture bundles let UI automation select test data without relaunching a real-home instance.
         let fixtureRoot: String?
         #if UI_TESTING
@@ -39,8 +40,16 @@ struct MacSlimApp: App {
                     _ = NSWorkspace.shared.open(URL(fileURLWithPath: RuntimeIdentity.installationPath))
                 } else {
                     let alert = NSAlert()
-                    alert.messageText = "请先安装 MacSlim"
-                    alert.informativeText = "请将应用拖入“应用程序”，然后从 /Applications/MacSlim.app 启动。其他副本不会执行清理。"
+                    alert.messageText = L10n.tr(
+                        en: "Install MacSlim First",
+                        ja: "先に MacSlim をインストールしてください",
+                        zh: "请先安装 MacSlim"
+                    )
+                    alert.informativeText = L10n.tr(
+                        en: "Drag MacSlim into Applications and launch it from /Applications/MacSlim.app. Copies in other locations will not run cleanup.",
+                        ja: "アプリを「アプリケーション」フォルダにドラッグし、/Applications/MacSlim.app から起動してください。他の場所のコピーではクリーンアップを実行できません。",
+                        zh: "请将应用拖入“应用程序”，然后从 /Applications/MacSlim.app 启动。其他副本不会执行清理。"
+                    )
                     alert.runModal()
                 }
                 exit(0)
@@ -69,16 +78,26 @@ struct MacSlimApp: App {
         #endif
         return nil
     }
+    private var lang: AppLanguage { store.config.language }
     var body: some Scene {
-        WindowGroup(fixtureMode ? "MacSlim · 测试数据" : "MacSlim") {
+        WindowGroup(fixtureMode
+            ? L10n.tr(en: "MacSlim · Test Fixture", ja: "MacSlim · テストデータ", zh: "MacSlim · 测试数据", language: lang)
+            : "MacSlim"
+        ) {
             MainView(store: store).preferredColorScheme(testAppearance).onAppear { appDelegate.store = store }
         }
             .windowStyle(.titleBar)
             .commands {
                 CommandGroup(replacing: .newItem) {
-                    Button("开始扫描") { store.startScan() }.keyboardShortcut("r", modifiers: .command).disabled(store.isBusy)
-                    Button("清理记录") { store.showHistory = true }.keyboardShortcut("l", modifiers: [.command, .shift])
-                    Button("检查更新…") { store.checkForUpdates() }.keyboardShortcut("u", modifiers: .command)
+                    Button(L10n.tr(en: "Start Scan", ja: "スキャン開始", zh: "开始扫描", language: lang)) {
+                        store.startScan()
+                    }.keyboardShortcut("r", modifiers: .command).disabled(store.isBusy)
+                    Button(L10n.tr(en: "Cleanup History", ja: "クリーンアップ履歴", zh: "清理记录", language: lang)) {
+                        store.showHistory = true
+                    }.keyboardShortcut("l", modifiers: [.command, .shift])
+                    Button(L10n.tr(en: "Check for Updates…", ja: "アップデートを確認…", zh: "检查更新…", language: lang)) {
+                        store.checkForUpdates()
+                    }.keyboardShortcut("u", modifiers: .command)
                 }
             }
     }
@@ -89,9 +108,20 @@ final class MacSlimDelegate: NSObject, NSApplicationDelegate {
     weak var store: AppStore?
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard store?.isBusy == true else { return .terminateNow }
+        let lang = store?.config.language ?? L10n.current
         let alert = NSAlert()
-        alert.messageText = "当前文件操作尚未结束"
-        alert.informativeText = "请先停止或等待任务完成，再退出或安装更新。"
+        alert.messageText = L10n.tr(
+            en: "File Operation in Progress",
+            ja: "ファイル操作が実行中です",
+            zh: "当前文件操作尚未结束",
+            language: lang
+        )
+        alert.informativeText = L10n.tr(
+            en: "Please stop or wait for the current task to finish before quitting or installing an update.",
+            ja: "終了またはアップデートをインストールする前に、現在のタスクを停止するか完了までお待ちください。",
+            zh: "请先停止或等待任务完成，再退出或安装更新。",
+            language: lang
+        )
         alert.runModal()
         return .terminateCancel
     }

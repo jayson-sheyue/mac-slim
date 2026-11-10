@@ -282,18 +282,39 @@ struct MacSlimTests {
             try dir(state.path)
             try Data("{\"minCacheSizeMB\":17,\"dormantAppDaysThreshold\":180,\"updateManifestURL\":\"https://unused.example\"}".utf8).write(to: state.appendingPathComponent("config.json"))
             let store = AppStore(environment: env, storageDirectoryURL: state, activity: inactive, testTrashDirectory: trash)
-            check(store.config.minCacheSizeMB == 17 && store.config.minimumAgeDays == 14, "Old configuration migrates without enabling removed features")
+            check(store.config.minCacheSizeMB == 17 && store.config.minimumAgeDays == 14 && store.config.language == .en, "Old configuration migrates without enabling removed features and defaults to English")
+            check(AppLanguage.allCases.map(\.displayName) == ["English", "日本語", "中文"], "Three interface languages (English, 日本語, 中文) are available")
+            check(L10n.tr(en: "Fallback text", ja: "", zh: nil, language: .ja) == "Fallback text" && L10n.tr(en: "Fallback text", ja: nil, zh: "", language: .zhHans) == "Fallback text", "Missing translations fall back to English")
+            let allRules: [ScanRuleKey] = [.shipIt, .sparkle, .genericUpdater, .appSupportCache, .logFile, .sandboxUpdater, .sandboxCache, .userCache, .devToolCache, .playwrightUnreferenced, .legacyFramework(current: "2.0", version: "1.0")]
+            check(allRules.allSatisfy { rule in
+                let reasons = Set(AppLanguage.allCases.map { rule.reason(in: $0) })
+                let impacts = Set(AppLanguage.allCases.map { rule.impact(in: $0) })
+                return reasons.count == 3 && impacts.count == 3 && !reasons.contains("") && !impacts.contains("")
+            }, "All scan rules provide distinct non-empty English, Japanese, and Chinese descriptions")
+            if let sampleShipIt = found(shipit) ?? report.items.first {
+                store.items = [sampleShipIt]
+                store.language = .ja
+                check(store.items.count == 1 && store.phase.contains("スキャン") && CleanupCategory.updaterLeftovers.title == "更新の残骸" && store.items[0].reason.contains("ShipIt"), "Switching to Japanese updates UI and item text without clearing scan results")
+                store.language = .zhHans
+                check(store.items.count == 1 && store.phase.contains("扫描") && CleanupCategory.updaterLeftovers.title == "更新残留" && store.items[0].reason.contains("更新"), "Switching to Chinese updates UI and item text without clearing scan results")
+                store.language = .en
+                check(store.items.count == 1 && store.phase.contains("Scan") && CleanupCategory.updaterLeftovers.title == "Update Leftovers", "Switching back to English updates UI and item text without clearing scan results")
+                store.language = .zhHans
+            } else { check(false, "Sample scan item available for language switch test") }
             store.items = [try item(cancelB)]
             store.config.minimumAgeDays = 21
             check(store.items.isEmpty, "Changing scan settings invalidates stale cleanup candidates")
             let reloaded = AppStore(environment: env, storageDirectoryURL: state, activity: inactive, testTrashDirectory: trash)
-            check(reloaded.config.minimumAgeDays == 21, "Settings persist across app sessions")
+            check(reloaded.config.minimumAgeDays == 21 && reloaded.config.language == .zhHans, "Settings and chosen language persist across app sessions")
+            reloaded.resetScanDefaults()
+            check(reloaded.config.minCacheSizeMB == 5 && reloaded.config.minimumAgeDays == 14 && reloaded.config.language == .zhHans, "Restoring scan defaults preserves user-selected language")
+            store.language = .en
             store.startScan(); store.stop()
             check(store.isScanning && store.isStopping, "Stop keeps UI busy until actual worker exits")
             let deadline = Date().addingTimeInterval(10)
             while store.isBusy && Date() < deadline { await Task.yield() }
-            check(!store.isBusy && !store.isStopping && store.phase.contains("停止"), "Worker acknowledgement finalizes canceled scan")
-            check(ScannerConfig(minCacheSizeMB: -1, minimumAgeDays: Int.max).minCacheSizeMB == 1 && ScannerConfig(minimumAgeDays: Int.max).minimumAgeDays == 3650, "Configuration clamps invalid and overflowing thresholds")
+            check(!store.isBusy && !store.isStopping && (store.phase.localizedCaseInsensitiveContains("stopped") || store.phase.contains("停止")), "Worker acknowledgement finalizes canceled scan")
+            check(ScannerConfig(minCacheSizeMB: -1, minimumAgeDays: Int.max).minCacheSizeMB == 1 && ScannerConfig(minimumAgeDays: Int.max).minimumAgeDays == 3650 && ScannerConfig.default.language == .en, "Configuration clamps invalid thresholds and defaults to English")
 
             check(SemVer(string: "1.10.0")! > SemVer(string: "1.9.0")!, "Numeric release ordering")
             check(SemVer(string: "1.0.0")! > SemVer(string: "1.0.0-beta.1")!, "Stable release outranks prerelease")
