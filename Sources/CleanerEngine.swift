@@ -180,7 +180,7 @@ public struct CleanerEngine: Sendable {
         let markers: Set<String> = ["cache", "caches", "code cache", "gpucache", "cachestorage", "cacheddata", "cachedextensionvsixs", "updatepackages", "crx_cache", "logs", "log"]
         let parents = components.dropLast()
         if parents.contains(where: { markers.contains($0) }) { return }
-        if item.path.contains("/org.sparkle-project.Sparkle/Installation/") || item.path.lowercased().contains("/larkshell/update/") { return }
+        if item.path.lowercased().contains("/org.sparkle-project.sparkle/installation/") || item.path.lowercased().contains("/larkshell/update/") { return }
         throw SafetyError.refused(L10n.tr(
             en: "Target does not match a supported cache, update package, or log layout",
             ja: "対象が対応済みのキャッシュ・更新パッケージ・ログ構造と一致しません",

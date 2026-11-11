@@ -9,9 +9,20 @@ public struct ScannerEngine: Sendable {
 
     private struct AppInfo {
         let name: String
+        let bundleName: String
         let bundleID: String
         let path: String
     }
+
+    private static let structuralDirectoryNames: Set<String> = [
+        "cache", "caches", "code cache", "gpucache", "gpupersistentcache",
+        "cachestorage", "cacheddata", "cachedextensionvsixs",
+        "logs", "log", "diagnosticreports",
+        "org.sparkle-project.sparkle", "installation",
+        "updatepackages", "update", "crx_cache",
+        "data", "library", "global", "user", "users", "default",
+        "partitions", "service worker", "profiles", "application support", "containers"
+    ]
 
     public func scan(config: ScannerConfig, onProgress: @Sendable (String) async -> Void) async -> ScanReport {
         let lang = config.language
@@ -56,14 +67,103 @@ public struct ScannerEngine: Sendable {
         func directory(_ path: String) -> Bool {
             (try? fm.attributesOfItem(atPath: path)[.type]) as? FileAttributeType == .typeDirectory
         }
-        func owners(_ path: String) -> [AppInfo] {
-            let components = path.components(separatedBy: "/").map { normalized($0.replacingOccurrences(of: ".ShipIt", with: "", options: .caseInsensitive)) }
-            let runningApps = activity.apps.map { AppInfo(name: URL(fileURLWithPath: $0.path).deletingPathExtension().lastPathComponent, bundleID: $0.bundleID, path: $0.path) }
-            return (apps + runningApps).filter { app in
-                let keys = [normalized(app.name), normalized(app.bundleID)]
-                return components.contains { component in
-                    component.count >= 4 && keys.contains { !$0.isEmpty && ($0 == component || $0.hasPrefix(component) || component.hasPrefix($0)) }
+        func ownerTokens(_ path: String) -> (bundleIDs: [String], names: Set<String>) {
+            let cachesRoot = library + "/Caches"
+            let supportRoot = library + "/Application Support"
+            let containersRoot = library + "/Containers"
+            let logsRoot = library + "/Logs"
+
+            var rawSegments: [String] = []
+            if FileSafety.isBelow(path, containersRoot) {
+                let parts = String(path.dropFirst(containersRoot.count + 1)).components(separatedBy: "/").filter { !$0.isEmpty }
+                if let first = parts.first { rawSegments = [first] }
+            } else if FileSafety.isBelow(path, cachesRoot) {
+                let parts = String(path.dropFirst(cachesRoot.count + 1)).components(separatedBy: "/").filter { !$0.isEmpty }
+                if let first = parts.first {
+                    if parts.count >= 3 && !first.contains(".") && !Self.structuralDirectoryNames.contains(parts[1].lowercased()) {
+                        rawSegments = [first, parts[1]]
+                    } else {
+                        rawSegments = [first]
+                    }
                 }
+            } else if FileSafety.isBelow(path, supportRoot) {
+                let parts = String(path.dropFirst(supportRoot.count + 1)).components(separatedBy: "/").filter { !$0.isEmpty }
+                for seg in parts.dropLast() {
+                    let lower = seg.lowercased()
+                    if Self.structuralDirectoryNames.contains(lower) || lower.hasPrefix("profile ") { break }
+                    rawSegments.append(seg)
+                    if rawSegments.count == 2 { break }
+                }
+            } else if FileSafety.isBelow(path, logsRoot) {
+                let parts = String(path.dropFirst(logsRoot.count + 1)).components(separatedBy: "/").filter { !$0.isEmpty }
+                if parts.count == 1 {
+                    var stem = parts[0]
+                    for ext in [".log", ".ips", ".crash"] where stem.lowercased().hasSuffix(ext) {
+                        stem = String(stem.dropLast(ext.count))
+                        break
+                    }
+                    rawSegments = [stem]
+                } else {
+                    for seg in parts.dropLast() {
+                        let lower = seg.lowercased()
+                        if Self.structuralDirectoryNames.contains(lower) { break }
+                        rawSegments.append(seg)
+                        if rawSegments.count == 2 { break }
+                    }
+                }
+            }
+
+            let cleaned = rawSegments.map { seg -> String in
+                seg.lowercased().hasSuffix(".shipit") ? String(seg.dropLast(7)) : seg
+            }.filter { !$0.isEmpty && !Self.structuralDirectoryNames.contains($0.lowercased()) }
+
+            var bundleIDTokens: [String] = []
+            var nameTokens: Set<String> = []
+            for seg in cleaned {
+                if seg.contains(".") {
+                    bundleIDTokens.append(seg.lowercased())
+                } else {
+                    let norm = normalized(seg)
+                    if norm.count >= 4 { nameTokens.insert(norm) }
+                }
+            }
+            if cleaned.count >= 2 && !cleaned[0].contains(".") && !cleaned[1].contains(".") {
+                let combined = normalized(cleaned[0] + cleaned[1])
+                if combined.count >= 4 { nameTokens.insert(combined) }
+            }
+            return (bundleIDTokens, nameTokens)
+        }
+        func owners(_ path: String) -> [AppInfo] {
+            let tokens = ownerTokens(path)
+            guard !tokens.bundleIDs.isEmpty || !tokens.names.isEmpty else { return [] }
+            let runningApps = activity.apps.compactMap { running -> AppInfo? in
+                guard !running.bundleID.isEmpty || !running.path.isEmpty else { return nil }
+                let bundleName = running.path.isEmpty ? "" : URL(fileURLWithPath: running.path).deletingPathExtension().lastPathComponent
+                return AppInfo(name: bundleName, bundleName: bundleName, bundleID: running.bundleID, path: running.path)
+            }
+            return (apps + runningApps).filter { app in
+                let idLower = app.bundleID.lowercased()
+                let nameKeys = Set([normalized(app.name), normalized(app.bundleName)].filter { $0.count >= 4 })
+                let idProductNorm: String? = {
+                    guard !idLower.isEmpty, let last = idLower.split(separator: ".").last else { return nil }
+                    let n = normalized(String(last))
+                    return n.count >= 4 ? n : nil
+                }()
+                let matchesBundleID = tokens.bundleIDs.contains { token in
+                    if !idLower.isEmpty && (idLower == token || token.hasPrefix(idLower + ".") || idLower.hasPrefix(token + ".")) {
+                        return true
+                    }
+                    let dotParts = token.split(separator: ".")
+                    if dotParts.count >= 3 {
+                        let product = normalized(dotParts.dropFirst(2).joined())
+                        if product.count >= 4 && nameKeys.contains(product) { return true }
+                    }
+                    return false
+                }
+                let matchesName = tokens.names.contains { token in
+                    nameKeys.contains(token) || (idProductNorm == token)
+                }
+                return matchesBundleID || matchesName
             }
         }
         func add(_ path: String, category: CleanupCategory, tier: CleanupTier, rule: ScanRuleKey,
@@ -72,7 +172,9 @@ public struct ScannerEngine: Sendable {
             do {
                 if !inspectionOnly { try FileSafety.validate(path, roots: environment.writableRoots) }
                 let matching = owner.map { [$0] } ?? owners(path)
-                guard inspectionOnly || !activity.isBusy(path: path, bundleIDs: matching.map(\.bundleID), appPaths: matching.map(\.path)) else {
+                let ownerBundleIDs = Array(Set(matching.map(\.bundleID).filter { !$0.isEmpty })).sorted()
+                let ownerAppPaths = Array(Set(matching.map(\.path).filter { !$0.isEmpty })).sorted()
+                guard inspectionOnly || !activity.isBusy(path: path, bundleIDs: ownerBundleIDs, appPaths: ownerAppPaths) else {
                     warn(L10n.tr(
                         en: "Skipped item currently in use: \(display(path))",
                         ja: "使用中の項目をスキップしました: \(display(path))",
@@ -85,11 +187,14 @@ public struct ScannerEngine: Sendable {
                 guard stamp.allocatedBytes >= minimumBytes else { return }
                 if !inspectionOnly && stamp.newestModification > cutoff { return }
                 seen.insert(path)
+                let resolvedAppName = matching.first(where: { !$0.name.isEmpty })?.name
+                    ?? environment.writableRoots.first(where: { FileSafety.isBelow(path, $0) }).flatMap { String(path.dropFirst($0.count + 1)).components(separatedBy: "/").first }
+                    ?? URL(fileURLWithPath: path).lastPathComponent
                 report.items.append(ScanItem(title: title ?? URL(fileURLWithPath: path).lastPathComponent,
-                    appName: matching.first?.name ?? environment.writableRoots.first(where: { FileSafety.isBelow(path, $0) }).flatMap { String(path.dropFirst($0.count + 1)).components(separatedBy: "/").first } ?? URL(fileURLWithPath: path).lastPathComponent,
+                    appName: resolvedAppName,
                     category: category, tier: tier, path: path,
                     reason: rule.reason(in: lang), impactNote: rule.impact(in: lang), stamp: stamp,
-                    ownerBundleIDs: matching.map(\.bundleID), ownerAppPaths: matching.map(\.path),
+                    ownerBundleIDs: ownerBundleIDs, ownerAppPaths: ownerAppPaths,
                     inspectionOnly: inspectionOnly, ruleKey: rule))
             } catch is CancellationError { }
             catch {
@@ -122,7 +227,10 @@ public struct ScannerEngine: Sendable {
                     guard !apps.contains(where: { $0.path == path }) else { continue }
                     let plistURL = URL(fileURLWithPath: path + "/Contents/Info.plist")
                     let plist = (try? Data(contentsOf: plistURL)).flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }
-                    apps.append(AppInfo(name: (plist?["CFBundleDisplayName"] as? String) ?? String(entry.dropLast(4)),
+                    let bundleName = String(entry.dropLast(4))
+                    let displayName = (plist?["CFBundleDisplayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    apps.append(AppInfo(name: (displayName?.isEmpty == false ? displayName! : bundleName),
+                                        bundleName: bundleName,
                                         bundleID: plist?["CFBundleIdentifier"] as? String ?? "", path: path))
                 } else { findApps(path, depth: depth + 1) }
             }

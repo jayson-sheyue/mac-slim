@@ -78,7 +78,7 @@ public struct MainView: View {
                     }
                 }.padding(12).frame(minWidth: 185, idealWidth: 205, maxWidth: 235)
                 VStack(alignment: .leading, spacing: 0) {
-                    HStack {
+                    HStack(spacing: 8) {
                         TextField(L10n.tr(
                             en: "Search app or path",
                             ja: "アプリまたはパスを検索",
@@ -86,17 +86,23 @@ public struct MainView: View {
                             language: lang
                         ), text: $store.searchText).textFieldStyle(.roundedBorder)
                         Button(L10n.tr(
-                            en: "Select Recommended",
-                            ja: "推奨項目を選択",
-                            zh: "选择建议项",
+                            en: "Recommended",
+                            ja: "推奨のみ",
+                            zh: "选建议项",
                             language: lang
-                        )) { store.selectRecommended() }.disabled(store.isBusy)
+                        )) { store.selectRecommended() }.disabled(store.isBusy || !store.hasCleanableFilteredItems)
                         Button(L10n.tr(
-                            en: "Deselect All",
+                            en: "Select All",
+                            ja: "すべて選択",
+                            zh: "全选",
+                            language: lang
+                        )) { store.selectAllCleanable() }.disabled(store.isBusy || !store.hasCleanableFilteredItems)
+                        Button(L10n.tr(
+                            en: "Clear",
                             ja: "選択解除",
                             zh: "取消选择",
                             language: lang
-                        )) { store.clearSelection() }.disabled(store.isBusy)
+                        )) { store.clearSelection() }.disabled(store.isBusy || store.selectedItems.isEmpty)
                     }.padding(12)
                     if store.items.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
@@ -126,6 +132,19 @@ public struct MainView: View {
                             language: lang
                         )).foregroundColor(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
+                        if !store.hasCleanableFilteredItems {
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "lock.shield").foregroundColor(.secondary)
+                                Text(L10n.tr(
+                                    en: "Items in this view are for inspection only. MacSlim never modifies or deletes files inside .app bundles so code signatures stay intact.",
+                                    ja: "この表示の項目は確認専用です。コード署名を保護するため、MacSlim は .app バンドル内のファイルを変更・削除しません。",
+                                    zh: "当前视图中的项目仅供检查。为保护应用代码签名完整，MacSlim 不会勾选或删除 .app 应用包内文件。",
+                                    language: lang
+                                )).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 8)
+                        }
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 0) {
                                 ForEach(store.filteredItems) { item in
@@ -246,25 +265,57 @@ public struct MainView: View {
     }
     private func itemRow(_ item: ScanItem) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Toggle(
-                L10n.tr(
-                    en: "Select \(item.title)",
-                    ja: "\(item.title) を選択",
-                    zh: "选择 \(item.title)",
-                    language: lang
-                ),
-                isOn: Binding(get: { item.isSelected }, set: { _ in store.toggle(item.id) })
-            )
-                .labelsHidden().toggleStyle(.checkbox).disabled(store.isBusy || item.inspectionOnly)
+            if item.inspectionOnly {
+                Image(systemName: "lock.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(width: 16, height: 18)
+                    .help(L10n.tr(
+                        en: "Inspection only: app bundles are never modified to protect code signatures.",
+                        ja: "確認専用: コード署名を保護するためアプリバンドルは変更しません。",
+                        zh: "仅供检查：为保护代码签名，不修改已安装应用包。",
+                        language: lang
+                    ))
+            } else {
+                Toggle(
+                    L10n.tr(
+                        en: "Select \(item.title)",
+                        ja: "\(item.title) を選択",
+                        zh: "选择 \(item.title)",
+                        language: lang
+                    ),
+                    isOn: Binding(get: { item.isSelected }, set: { store.setSelected(item.id, $0) })
+                )
+                    .labelsHidden().toggleStyle(.checkbox).disabled(store.isBusy)
+            }
             VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(item.title).font(.headline).textSelection(.enabled)
-                    Spacer()
-                    Text(item.formattedSize).monospacedDigit()
+                if item.inspectionOnly {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(item.title).font(.headline)
+                        Spacer()
+                        Text(item.formattedSize).monospacedDigit()
+                    }
+                } else {
+                    Button {
+                        store.toggle(item.id)
+                    } label: {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(item.title).font(.headline)
+                            Spacer()
+                            Text(item.formattedSize).monospacedDigit()
+                        }.contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(store.isBusy)
                 }
                 HStack {
                     Text(item.inspectionOnly
-                        ? L10n.tr(en: "Inspection Only", ja: "確認専用", zh: "仅供检查", language: lang)
+                        ? L10n.tr(
+                            en: "Inspection Only (Protected)",
+                            ja: "確認専用（保護対象）",
+                            zh: "仅供检查（保护签名，不可删除）",
+                            language: lang
+                        )
                         : item.tier.title(in: lang)
                     )
                         .foregroundColor(item.tier == .safe && !item.inspectionOnly ? .secondary : .primary)

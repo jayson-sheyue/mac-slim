@@ -180,6 +180,7 @@ public final class AppStore: ObservableObject {
             (searchText.isEmpty || [item.title, item.appName, item.path].contains { $0.localizedCaseInsensitiveContains(searchText) })
         }
     }
+    public var hasCleanableFilteredItems: Bool { filteredItems.contains { !$0.inspectionOnly } }
 
     public init(environment: ScanEnvironment = ScanEnvironment(), storageDirectoryURL: URL? = nil,
                 activity: @escaping @Sendable () -> ActivitySnapshot = { .current() }, testTrashDirectory: String? = nil) {
@@ -370,9 +371,22 @@ public final class AppStore: ObservableObject {
         guard !isBusy, let i = items.firstIndex(where: { $0.id == id }), !items[i].inspectionOnly else { return }
         items[i].isSelected.toggle()
     }
+    public func setSelected(_ id: UUID, _ selected: Bool) {
+        guard !isBusy, let i = items.firstIndex(where: { $0.id == id }), !items[i].inspectionOnly else { return }
+        if items[i].isSelected != selected {
+            items[i].isSelected = selected
+        }
+    }
     public func selectRecommended() {
         guard !isBusy else { return }
         for i in items.indices { items[i].isSelected = items[i].tier == .safe && !items[i].inspectionOnly }
+    }
+    public func selectAllCleanable() {
+        guard !isBusy else { return }
+        let visibleIDs = Set(filteredItems.filter { !$0.inspectionOnly }.map(\.id))
+        for i in items.indices where visibleIDs.contains(items[i].id) {
+            items[i].isSelected = true
+        }
     }
     public func clearSelection() {
         guard !isBusy else { return }

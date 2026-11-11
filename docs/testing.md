@@ -109,3 +109,9 @@ GUI 隔离验收须额外使用 `swiftc -D UI_TESTING` 构建独立测试包（�
 - 验证首次启动及旧版 `config.json` 迁移默认界面语言为 `English`（不因系统区域设置自动切为日文或中文），切换 `English`、`日本語`、`中文` 时保留已扫描项目并实时更新规则依据、影响说明与阶段状态，重启后恢复已保存语言，恢复扫描默认阈值保留所选语言，缺失译文回退为英语。
 - 在 `740 × 560` 最小窗口尺寸下核验 `English`、`日本語`、`中文` 三语布局，无子视图水平溢出。
 - 校验 `README.md`、`README.ja.md`、`README.zh-CN.md` 的三语互链、页内锚点、相对路径与 `1.1.1-beta.4` 版本标识一致。
+
+## 1.1.1-beta.5 进程关联误判与列表勾选交互修复验证（2026-11-11）
+
+- 本机隔离回归：99 条 Swift 断言与 14 项 Python 安装器测试通过。
+- 覆盖系统账户名（如 `Users/apple`）、结构目录名（`Caches`、`Application Support` 等）、空 `bundleID`/`path` 后台进程以及同厂商兄弟 Bundle ID（如 `com.google.Chrome` 运行时不误拦其他 `com.google.*` 闲置工具）下的扫描发现与清理执行回归，同时验证真正运行中的应用及其子进程仍保持拦截保护。
+- 覆盖 `setSelected` 幂等勾选、`selectAllCleanable` 按当前筛选范围全选可清理项且不选中 `inspectionOnly` 项、点击标题行切换勾选，以及仅含 `inspectionOnly` 项时的锁定标识与说明提示；`740 × 560` 三语布局核验无子视图水平溢出。

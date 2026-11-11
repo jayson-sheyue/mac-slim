@@ -403,8 +403,8 @@ public struct DiskUsageInfo: Sendable {
 
 public enum AppMetadata {
     public static let appName = "MacSlim"
-    public static let version = "1.1.1-beta.4"
-    public static let buildNumber = 114
+    public static let version = "1.1.1-beta.5"
+    public static let buildNumber = 115
     public static let defaultChannel = "stable"
     public static let minSystemVersion = "13.0"
     public static let repositoryURL = "https://github.com/jayson-sheyue/mac-slim"

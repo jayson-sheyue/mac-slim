@@ -316,6 +316,103 @@ struct MacSlimTests {
             check(!store.isBusy && !store.isStopping && (store.phase.localizedCaseInsensitiveContains("stopped") || store.phase.contains("停止")), "Worker acknowledgement finalizes canceled scan")
             check(ScannerConfig(minCacheSizeMB: -1, minimumAgeDays: Int.max).minCacheSizeMB == 1 && ScannerConfig(minimumAgeDays: Int.max).minimumAgeDays == 3650 && ScannerConfig.default.language == .en, "Configuration clamps invalid thresholds and defaults to English")
 
+            // Regression: realistic OS username + background system daemons + empty bundleID processes
+            let realisticHome = root.appendingPathComponent("Users/apple").path
+            let realisticApps = root.appendingPathComponent("RealisticApps").path
+            let realisticEnv = ScanEnvironment(homeDirectory: realisticHome, applicationDirectories: [realisticApps])
+            for path in realisticEnv.writableRoots { try dir(path) }
+            try dir(realisticApps)
+            let chromeApp = realisticApps + "/Google Chrome.app"
+            try dir(chromeApp + "/Contents")
+            try PropertyListSerialization.data(
+                fromPropertyList: ["CFBundleIdentifier": "com.google.Chrome", "CFBundleDisplayName": "Google Chrome"],
+                format: .xml, options: 0
+            ).write(to: URL(fileURLWithPath: chromeApp + "/Contents/Info.plist"))
+            let unbundledApp = realisticApps + "/NoBundleIDTool.app"
+            try dir(unbundledApp + "/Contents")
+            try PropertyListSerialization.data(
+                fromPropertyList: ["CFBundleDisplayName": "NoBundleIDTool"],
+                format: .xml, options: 0
+            ).write(to: URL(fileURLWithPath: unbundledApp + "/Contents/Info.plist"))
+
+            let idleShipIt = realisticHome + "/Library/Caches/com.vendor.CodeEditor.ShipIt/update.100"
+            try file(idleShipIt + "/payload.bin"); try ageTree(idleShipIt)
+            let idleSparkle = realisticHome + "/Library/Caches/com.vendor.Writer/org.sparkle-project.sparkle/Installation/pkg1"
+            try file(idleSparkle + "/archive.bin"); try ageTree(idleSparkle)
+            let siblingVendorLog = realisticHome + "/Library/Caches/com.google.OtherDesktopTool/Logs/tool.log"
+            try file(siblingVendorLog)
+            let idleDevCache = realisticHome + "/Library/Caches/pip/wheels-cache"
+            try file(idleDevCache + "/pkg.whl"); try ageTree(idleDevCache)
+            let activeChromeCache = realisticHome + "/Library/Application Support/Google/Chrome/Default/Cache/Cache_Data"
+            try file(activeChromeCache + "/entry.bin"); try ageTree(activeChromeCache)
+            let activeHelperLog = realisticHome + "/Library/Caches/com.google.Chrome.helper/Logs/helper.log"
+            try file(activeHelperLog)
+
+            let realisticActivity: @Sendable () -> ActivitySnapshot = {
+                ActivitySnapshot(
+                    apps: [
+                        RunningApplication(bundleID: "", path: ""),
+                        RunningApplication(bundleID: "", path: "/usr/libexec/background_helper"),
+                        RunningApplication(bundleID: "com.apple.AppleSpell", path: "/System/Library/Services/AppleSpell.service"),
+                        RunningApplication(bundleID: "com.apple.CacheDelete", path: "/System/Library/PrivateFrameworks/CacheDelete.framework"),
+                        RunningApplication(bundleID: "com.google.Chrome", path: chromeApp)
+                    ],
+                    executables: ["/sbin/launchd", chromeApp + "/Contents/MacOS/Google Chrome"],
+                    reliable: true
+                )
+            }
+            let realisticScanner = ScannerEngine(environment: realisticEnv, activity: realisticActivity)
+            let realisticReport = await realisticScanner.scan(config: ScannerConfig(minCacheSizeMB: 1, minimumAgeDays: 14)) { _ in }
+            func realisticFound(_ path: String) -> ScanItem? { realisticReport.items.first { $0.path == path } }
+            check(realisticFound(idleShipIt)?.isSelected == true, "OS username 'apple' and empty-bundleID daemons do not falsely block idle ShipIt leftovers")
+            check(realisticFound(idleSparkle)?.isSelected == true, "Lowercase Sparkle installation path discovered under realistic activity")
+            check(realisticFound(siblingVendorLog)?.isSelected == true, "Running com.google.Chrome does not falsely block sibling com.google.* tool logs")
+            check(realisticFound(idleDevCache)?.tier == .review, "Developer tool cache discovered without false-positive busy match on Caches/apple")
+            check(realisticFound(activeChromeCache) == nil && realisticFound(activeHelperLog) == nil, "Actively running app cache and sub-bundle helper logs remain protected")
+
+            let realisticRecovery = try RecoveryStore(directory: root.appendingPathComponent("RealisticRecovery"))
+            let realisticCleaner = CleanerEngine(environment: realisticEnv, recovery: realisticRecovery, activity: realisticActivity, testTrashDirectory: trash)
+            if let sparkleCandidate = realisticFound(idleSparkle), let devCandidate = realisticFound(idleDevCache) {
+                let cleanSparkle = await realisticCleaner.cleanItem(sparkleCandidate, mode: .moveToTrash)
+                let cleanDev = await realisticCleaner.cleanItem(devCandidate, mode: .permanentDelete)
+                check(cleanSparkle.success && cleanDev.success && !fm.fileExists(atPath: idleSparkle) && !fm.fileExists(atPath: idleDevCache), "Scanned candidates can be selected and deleted under realistic background process state")
+            } else {
+                check(false, "Expected cleanable realistic candidates to exist")
+            }
+
+            // Selection state & inspectionOnly UI logic regressions
+            let selectionStore = AppStore(environment: realisticEnv, storageDirectoryURL: root.appendingPathComponent("SelectionState"), activity: realisticActivity, testTrashDirectory: trash)
+            let inspectDummy = ScanItem(
+                title: "Google Chrome · 156.0",
+                appName: "Google Chrome",
+                category: .redundantFrameworks,
+                tier: .review,
+                path: chromeApp + "/Contents/Frameworks/Chrome.framework/Versions/156.0",
+                reason: "r",
+                impactNote: "i",
+                stamp: realisticReport.items[0].stamp,
+                inspectionOnly: true,
+                ruleKey: .legacyFramework(current: "157.0", version: "156.0")
+            )
+            if let safeSample = realisticFound(idleShipIt), let reviewSample = realisticFound(siblingVendorLog).map({
+                ScanItem(title: $0.title, appName: $0.appName, category: .browserAndAppCache, tier: .review, path: $0.path, reason: $0.reason, impactNote: $0.impactNote, stamp: $0.stamp, ruleKey: .userCache)
+            }) {
+                selectionStore.items = [safeSample, reviewSample, inspectDummy]
+                check(selectionStore.hasCleanableFilteredItems, "Mixed list reports cleanable items available")
+                selectionStore.setSelected(reviewSample.id, true)
+                selectionStore.setSelected(reviewSample.id, true)
+                selectionStore.setSelected(inspectDummy.id, true)
+                check(selectionStore.items[1].isSelected && !selectionStore.items[2].isSelected, "setSelected is idempotent and never selects inspectionOnly items")
+                selectionStore.clearSelection()
+                selectionStore.selectedCategory = .browserAndAppCache
+                selectionStore.selectAllCleanable()
+                check(!selectionStore.items[0].isSelected && selectionStore.items[1].isSelected && !selectionStore.items[2].isSelected, "selectAllCleanable selects review items in current filter without selecting hidden or inspectionOnly items")
+                selectionStore.selectedCategory = .redundantFrameworks
+                check(!selectionStore.hasCleanableFilteredItems, "Inspection-only category reports zero cleanable filtered items")
+            } else {
+                check(false, "Selection regression fixtures available")
+            }
+
             check(SemVer(string: "1.10.0")! > SemVer(string: "1.9.0")!, "Numeric release ordering")
             check(SemVer(string: "1.0.0")! > SemVer(string: "1.0.0-beta.1")!, "Stable release outranks prerelease")
             check(SemVer(string: "1.0.0+a") == SemVer(string: "1.0.0+b"), "Build metadata does not change precedence")

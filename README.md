@@ -4,7 +4,7 @@ English · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
 
 A native macOS cleanup utility that helps you inspect and remove leftover installer packages from app updates, accumulated caches, and historical logs. Built for macOS 13 and later as a Universal binary for Apple Silicon and Intel; see the [Testing Documentation](docs/testing.md) for verified environments.
 
-> This document corresponds to the **1.1.1-beta.4 pre-release**. Official installer packages are defined by the assets listed on [GitHub Releases](https://github.com/jayson-sheyue/mac-slim/releases); earlier versions have different feature sets and safety boundaries.
+> This document corresponds to the **1.1.1-beta.5 pre-release**. Official installer packages are defined by the assets listed on [GitHub Releases](https://github.com/jayson-sheyue/mac-slim/releases); earlier versions have different feature sets and safety boundaries.
 
 [Installation & Build Guide](#installation--usage) · [Specific Scan Rules](#specific-scan-rules)
 

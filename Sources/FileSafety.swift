@@ -175,18 +175,30 @@ public struct ActivitySnapshot: Sendable {
         self.apps = apps; self.executables = executables; self.reliable = reliable
     }
     public func isBusy(path: String, bundleIDs: [String], appPaths: [String]) -> Bool {
-        !reliable || apps.contains { app in
-            bundleIDs.contains(app.bundleID) || appPaths.contains(app.path)
+        let validBundleIDs = Set(bundleIDs.filter { !$0.isEmpty })
+        let validAppPaths = appPaths.filter { !$0.isEmpty }
+        return !reliable || apps.contains { app in
+            (!app.bundleID.isEmpty && validBundleIDs.contains(app.bundleID)) ||
+            (!app.path.isEmpty && validAppPaths.contains(app.path))
         } || executables.contains { executable in
-            executable == path || FileSafety.isBelow(executable, path) || appPaths.contains(where: { executable == $0 || FileSafety.isBelow(executable, $0) })
+            guard !executable.isEmpty else { return false }
+            return executable == path || FileSafety.isBelow(executable, path) ||
+                validAppPaths.contains(where: { executable == $0 || FileSafety.isBelow(executable, $0) })
         }
     }
     public static func current() -> ActivitySnapshot {
-        let apps = NSWorkspace.shared.runningApplications.map {
-            RunningApplication(bundleID: $0.bundleIdentifier ?? "", path: $0.bundleURL.map { FileSafety.canonicalPath($0.path) } ?? "")
+        let apps = NSWorkspace.shared.runningApplications.compactMap { running -> RunningApplication? in
+            let bundleID = running.bundleIdentifier ?? ""
+            let path = running.bundleURL.map { FileSafety.canonicalPath($0.path) } ?? ""
+            guard !bundleID.isEmpty || !path.isEmpty else { return nil }
+            return RunningApplication(bundleID: bundleID, path: path)
         }
         let result = ProcessRunner.run("/bin/ps", ["-axo", "comm="], timeout: 5)
-        return ActivitySnapshot(apps: apps, executables: result.output.split(separator: "\n").map(String.init), reliable: result.status == 0)
+        return ActivitySnapshot(
+            apps: apps,
+            executables: result.output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            reliable: result.status == 0
+        )
     }
 }
 
