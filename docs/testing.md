@@ -115,3 +115,8 @@ GUI 隔离验收须额外使用 `swiftc -D UI_TESTING` 构建独立测试包（�
 - 本机隔离回归：99 条 Swift 断言与 14 项 Python 安装器测试通过。
 - 覆盖系统账户名（如 `Users/apple`）、结构目录名（`Caches`、`Application Support` 等）、空 `bundleID`/`path` 后台进程以及同厂商兄弟 Bundle ID（如 `com.google.Chrome` 运行时不误拦其他 `com.google.*` 闲置工具）下的扫描发现与清理执行回归，同时验证真正运行中的应用及其子进程仍保持拦截保护。
 - 覆盖 `setSelected` 幂等勾选、`selectAllCleanable` 按当前筛选范围全选可清理项且不选中 `inspectionOnly` 项、点击标题行切换勾选，以及仅含 `inspectionOnly` 项时的锁定标识与说明提示；`740 × 560` 三语布局核验无子视图水平溢出。
+
+## 1.1.1 正式版转正（2026-11-12）
+
+- 源码与 1.1.1-beta.5 一致，仅更新版本号（build 116）与文档；经用户决定接受剩余风险转为正式版。
+- 未完成：Developer ID 签名与公证、macOS 13/14 与实体 Intel 真机、干净环境首次安装、旧版 OTA 实机升级。

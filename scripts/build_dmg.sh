@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
 VERSION="$(tr -d '[:space:]' < "${PROJECT_DIR}/VERSION")"
-BUILD_NUMBER="115"
+BUILD_NUMBER="116"
 SOURCE_COMMIT="$(git -C "${PROJECT_DIR}" rev-parse HEAD)"
 BUILD_DIR="${PROJECT_DIR}/build"
 DIST_DIR="${PROJECT_DIR}/dist"
